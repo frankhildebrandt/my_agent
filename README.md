@@ -59,7 +59,11 @@ Alternativ kann im Projektverzeichnis eine `.env` liegen. Sie wird beim Start au
 - `/settings` oeffnet `settings.json` im Default-Editor des Systems
 - `/models` listet konfigurierte Modell-Aliase
 - `/use <alias>` wechselt das aktive Modell fuer die laufende Session
-- `/reset` setzt den aktuellen Chat-Kontext zurueck
+- `/debug` schaltet einen session-lokalen Debug-Modus an oder aus; bei aktiver Option zeigt die TUI zusaetzlich Embedding-Aufrufe, genutzte Memory-Bloecke und den segmentierten effektiven Prompt
+- `/reset` leert Session und `short_term_memory`, laesst `mid_term_memory` und `long_term_memory` aber unberuehrt
+- `/sleep` verdichtet `short_term_memory` per LLM in dedupliziertes `mid_term_memory` und in strengere, bewaehrte `long_term_memory`-Fragmente; dabei sollen insbesondere erzeugte oder benutzte Tools und Hilfsskripte mit Namen, Zweck, Parametern und Funktionsweise kompakt festgehalten werden; danach wird die Session geleert
+- `/sleepquiet` verhaelt sich wie `/sleep`, zeigt aber nur eine knappe Erfolgsmeldung
+- `/memoryreset` leert `short_term_memory`, `mid_term_memory` und `long_term_memory` komplett
 
 ### Tool-Registry
 
@@ -72,12 +76,11 @@ Die Tool-Implementierungen liegen modular unter [src/tools](/Users/frankhildebra
 - `prompt.ts` baut den Tool-spezifischen Prompt aus den registrierten Metadaten
 - `parse.ts` validiert Tool-Responses gegen die Registry
 
-Aktuell sind vier Tools registriert:
+Aktuell sind drei Tools registriert:
 
 - `query_script_registry` durchsucht bekannte Hilfsskripte ueber Registry-Metadaten und Embedding-Suche
 - `create_typescript_file` erzeugt `.ts`-Dateien innerhalb von `tools.scriptsDir` und veroeffentlicht sie mit Hilfetext in der Registry
 - `run_typescript_file` fuehrt diese Dateien mit `tsx` aus und gibt `stdout`, `stderr`, Exitcode und Timeout-Status an das Modell zurueck
-- `save_agent_memory` speichert dauerhaft nuetzliches Wissen in `memory.dir`
 
 Die Loop endet, sobald das Modell eine finale Antwort liefert oder `tools.maxRoundtrips` erreicht ist.
 
@@ -89,18 +92,36 @@ Neue Skripte werden beim Tool `create_typescript_file` zusammen mit einem kurzen
 
 ### Agent Memory
 
-Persistentes Wissen liegt unter `memory.dir` und standardmaessig in `./agent_memory`.
+Der Agent nutzt jetzt ein fragmentiertes Drei-Stufen-Memory:
 
-`save_agent_memory` veroeffentlicht Memory-Eintraege jetzt auch in einem Memory-Index mit Embeddings. Vor jeder Nutzeranfrage werden die relevantesten Memory-Eintraege fuer genau diese Anfrage aus dem Index geholt und in den Systemkontext geladen; wenn keine Embeddings verfuegbar sind, faellt die Auswahl auf einfache Textbewertung oder aktuelle Dateien zurueck.
+- `short_term_memory` fuer fluechtigen Session-Kontext aus Unterhaltung, Tool-Nutzung und lokalen Zwischenstaenden
+- `mid_term_memory` fuer deduplizierte, aktuell relevante Arbeits-Erinnerungen mit begrenzter Haltbarkeit; dieser Tier darf weniger relevante Eintraege wieder vergessen
+- `long_term_memory` fuer bewaehrte, sichere Wissensfragmente, die bereits schnell zu guten Ergebnissen gefuehrt haben; dieser Tier wird im normalen Betrieb nicht vergessen
+
+Das zentrale Ziel ist kleine Prompts. Vor jeder Nutzeranfrage werden nur die relevantesten `long_term_memory`- und `mid_term_memory`-Fragmente sowie ein kompaktes `short_term_memory`-Snapshot in den Prompt geladen. Ganze Verlaeufe oder grosse Memory-Dateien werden nicht mehr implizit mitgeschleppt.
+
+Mit `/debug` kann die TUI diese Auswahl sichtbar machen. Der Modus zeigt nur Beobachtungsdaten an: verwendete Embedding-Requests, Retrieval-Pfad fuer Mid-/Long-Term-Memory und den nach Segmenten getrennten Prompt. Die eigentliche Ranking-, Tool- und Prompt-Logik wird dadurch nicht veraendert.
+
+Persistentes Wissen wird nicht mehr direkt per Tool geschrieben. Stattdessen landet neuer Kontext zuerst im `short_term_memory` und wird erst mit `/sleep` oder `/sleepquiet` in `mid_term_memory` und gegebenenfalls zusaetzlich in `long_term_memory` hochgestuft.
 
 Wichtige Settings:
 
-- `memory.dir` definiert das Zielverzeichnis fuer persistentes Agent-Wissen
-- `memory.indexPath` definiert die persistente Memory-Indexdatei
-- `memory.topK` begrenzt die Anzahl relevanter Memory-Treffer pro Anfrage
-- `memory.maxEntries` begrenzt die Anzahl geladener Memory-Dateien
-- `memory.maxCharsPerFile` begrenzt die pro Datei geladene Textmenge
-- `memory.maxTotalChars` begrenzt die gesamte Memory-Menge im Prompt
+- `memory.shortTerm.mode` steuert, ob STM aus Buffer, Conversation oder hybrid aufgebaut wird
+- `memory.shortTerm.maxTotalChars` begrenzt die gesamte STM-Menge im Prompt
+- `memory.shortTerm.persistPath` definiert die persistente Session-Ablage fuer STM
+- `memory.midTerm.dir` definiert das Zielverzeichnis fuer Mid-Term-Fragmente
+- `memory.midTerm.indexPath` definiert den persistierten `vectra`-Indexordner fuer Mid-Term-Fragmente
+- `memory.midTerm.topK` begrenzt die Anzahl relevanter Mid-Term-Fragmente pro Anfrage
+- `memory.midTerm.maxFragmentChars` begrenzt die Groesse einzelner Mid-Term-Fragmente
+- `memory.midTerm.maxTotalChars` begrenzt die gesamte Mid-Term-Menge im Prompt
+- `memory.midTerm.maxFragmentsPerSleep` begrenzt die Anzahl neuer oder aktualisierter Mid-Term-Fragmente pro Sleep-Durchlauf
+- `memory.midTerm.maxEntries` begrenzt, wie viele Mid-Term-Fragmente nach Relevanz behalten werden; weniger relevante Eintraege werden entfernt
+- `memory.longTerm.dir` definiert das Zielverzeichnis fuer fragmentiertes persistentes Wissen
+- `memory.longTerm.indexPath` definiert den persistierten `vectra`-Indexordner fuer LTM-Fragmente
+- `memory.longTerm.topK` begrenzt die Anzahl relevanter Fragmente pro Anfrage
+- `memory.longTerm.maxFragmentChars` begrenzt die Groesse einzelner Fragmente
+- `memory.longTerm.maxTotalChars` begrenzt die gesamte LTM-Menge im Prompt
+- `memory.longTerm.maxFragmentsPerSleep` begrenzt die Anzahl neuer Fragmente pro Sleep-Durchlauf
 - `scriptRegistry.path` definiert die persistente Registry-Datei fuer Hilfsskripte
 - `scriptRegistry.topK` begrenzt die Anzahl der Suchtreffer
 - `scriptRegistry.embeddings.*` konfiguriert Provider, Modell und Timeout fuer die Vektorsuche
