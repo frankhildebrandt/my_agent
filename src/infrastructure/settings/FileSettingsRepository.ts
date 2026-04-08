@@ -59,6 +59,7 @@ export class FileSettingsRepository implements ISettingsRepository {
     const midTermIndexPath = settings.memory.midTerm.indexPath.trim();
     const longTermDir = settings.memory.longTerm.dir.trim();
     const longTermIndexPath = settings.memory.longTerm.indexPath.trim();
+    const modulesDir = settings.modules.dir.trim();
     const scriptRegistryPath = settings.scriptRegistry.path.trim();
     const scriptRegistryIndexPath = settings.scriptRegistry.indexPath.trim();
     const scriptsDir = settings.tools.scriptsDir.trim();
@@ -100,6 +101,10 @@ export class FileSettingsRepository implements ISettingsRepository {
               : resolve(process.cwd(), "agent_memory", "long_term_index"),
         },
       },
+      modules: {
+        ...settings.modules,
+        dir: modulesDir.length > 0 ? resolve(process.cwd(), modulesDir) : resolve(process.cwd(), "agent_modules"),
+      },
       scriptRegistry: {
         ...settings.scriptRegistry,
         path:
@@ -119,4 +124,3 @@ export class FileSettingsRepository implements ISettingsRepository {
     };
   }
 }
-

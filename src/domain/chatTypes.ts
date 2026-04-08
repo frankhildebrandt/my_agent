@@ -10,6 +10,15 @@ export interface SleepConsolidationResponse {
   fragments?: LongTermFragmentDraft[];
   midTermFragments: LongTermFragmentDraft[];
   longTermFragments: LongTermFragmentDraft[];
+  problemMidTermFragments?: LongTermFragmentDraft[];
+  problemLongTermFragments?: LongTermFragmentDraft[];
+}
+
+export interface MemoryRoundupResponse {
+  midTermFragments: LongTermFragmentDraft[];
+  longTermFragments: LongTermFragmentDraft[];
+  problemMidTermFragments?: LongTermFragmentDraft[];
+  problemLongTermFragments?: LongTermFragmentDraft[];
 }
 
 export interface ScriptKnowledgeResponse {

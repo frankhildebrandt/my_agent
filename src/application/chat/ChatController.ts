@@ -3,10 +3,12 @@ import { DebugCollector } from "../../debug";
 import { SessionContext } from "../session/SessionContext";
 import { ContextBuilder } from "./ContextBuilder";
 import {
+  buildMemoryRoundupMessages,
   buildScriptKnowledgeMessages,
   buildSleepMessages,
   estimateCreditEquivalentTokens,
   estimateTokensFromMessages,
+  extractFailureFeedbackFromShortTermEntries,
   fetchJsonWithBearer,
   formatDuration,
   formatHelpMessage,
@@ -14,6 +16,8 @@ import {
   formatUsd,
   inferModelContextLimits,
   inferModelPricing,
+  mergeConsolidationFragments,
+  parseMemoryRoundupResponse,
   parseScriptKnowledgeResponse,
   parseSleepConsolidationResponse,
   renderDebugReport,
@@ -23,7 +27,7 @@ import type { AppSettings } from "../../settings";
 import type { ChatCompletionStreamCallbacks, ChatMessage } from "../../inference";
 import { InferenceError } from "../../inference";
 import type { RequestDebugInfo, ScriptKnowledgeResponse } from "../../domain/chatTypes";
-import type { ShortTermConversationEntry } from "../../memory";
+import type { MemoryFeedbackEntry, PersistedMemoryFragment, ShortTermConversationEntry } from "../../memory";
 import { parseAssistantToolResponse } from "../../tools";
 import { CommandDispatcher } from "../commands/CommandDispatcher";
 
@@ -80,6 +84,7 @@ export class ChatController {
         this.view.appendMessage("sys>", "Session und Short-Term-Memory zurueckgesetzt.");
       },
       onSleep: (quiet) => this.handleSleepCommand(quiet),
+      onMemoryRoundup: () => this.handleMemoryRoundupCommand(),
       onMemoryReset: () => {
         this.sessionContext.reset();
         this.memoryRepository.resetAllMemory(this.settings);
@@ -290,7 +295,10 @@ export class ChatController {
       this.settings,
       this.sessionContext.sessionEvents,
     ).debug;
+    const sleepFeedback = this.memoryRepository.loadSleepFeedback(this.settings);
+    const failureFeedback = this.collectFailureFeedback();
     const debugCollector = this.sessionContext.debugEnabled ? new DebugCollector() : undefined;
+    const sleepMessages = buildSleepMessages(snapshot, sleepFeedback, failureFeedback);
 
     if (snapshot.length === 0) {
       this.sessionContext.reset();
@@ -314,7 +322,7 @@ export class ChatController {
       const result = await this.inferenceClient.createChatCompletion(
         this.settings,
         this.sessionContext.activeModelAlias,
-        buildSleepMessages(snapshot),
+        sleepMessages,
         debugCollector,
         {
           purpose: "sleep_consolidation",
@@ -332,14 +340,15 @@ export class ChatController {
           this.settings.memory.longTerm.maxFragmentsPerSleep,
         ),
       );
+      const merged = mergeConsolidationFragments(parsed);
       const storedMidTermFragments = await this.memoryRepository.storeMidTermMemoryFragments(
         this.settings,
-        parsed.midTermFragments,
+        merged.midTermFragments,
         debugCollector,
       );
       const storedLongTermFragments = await this.memoryRepository.storeLongTermMemoryFragments(
         this.settings,
-        parsed.longTermFragments,
+        merged.longTermFragments,
         debugCollector,
       );
       const storedFragments = [...storedMidTermFragments, ...storedLongTermFragments];
@@ -358,9 +367,9 @@ export class ChatController {
                 {
                   label: "Sleep-Systemprompt",
                   role: "system",
-                  content: buildSleepMessages(snapshot)[0]?.content ?? "",
+                  content: sleepMessages[0]?.content ?? "",
                 },
-                { label: "Sleep-User-Snapshot", role: "user", content: snapshot },
+                { label: "Sleep-User-Snapshot", role: "user", content: sleepMessages[1]?.content ?? snapshot },
               ],
               shortTerm: shortTermDebug,
               midTerm: {
@@ -418,7 +427,7 @@ export class ChatController {
 
       this.view.appendMessage(
         "sys>",
-        `Sleep abgeschlossen. MTM ${storedMidTermFragments.length}, LTM ${storedLongTermFragments.length}: ${storedFragments.map((fragment) => `${fragment.title} [${fragment.action === "created" ? "neu" : "aktualisiert"}]`).join(" | ")}`,
+        this.summarizeStoredFragments("Sleep abgeschlossen", storedMidTermFragments, storedLongTermFragments),
       );
     } catch (error) {
       this.view.clearTransientStatus();
@@ -426,7 +435,150 @@ export class ChatController {
         error instanceof InferenceError || error instanceof Error
           ? error.message
           : "Unbekannter Fehler bei /sleep.";
+      this.memoryRepository.recordMemoryFeedback(this.settings, {
+        createdAt: new Date().toISOString(),
+        scope: quiet ? "sleepquiet" : "sleep",
+        outcome: "failure",
+        message,
+      });
       this.view.appendMessage("sys>", `Sleep fehlgeschlagen: ${message}`);
+    } finally {
+      if (this.activeExecution?.controller === execution.controller) {
+        this.activeExecution = null;
+      }
+    }
+  }
+
+  private dedupeFeedbackEntries(entries: MemoryFeedbackEntry[]): MemoryFeedbackEntry[] {
+    const seen = new Set<string>();
+    const deduped: MemoryFeedbackEntry[] = [];
+
+    for (const entry of entries) {
+      const normalizedMessage = entry.message.trim();
+      if (normalizedMessage.length === 0) {
+        continue;
+      }
+      const key = `${entry.scope}:${entry.outcome}:${normalizedMessage.toLowerCase()}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      deduped.push({
+        ...entry,
+        message: normalizedMessage,
+      });
+    }
+
+    return deduped.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  private collectFailureFeedback(): MemoryFeedbackEntry[] {
+    const persistedFeedback = this.memoryRepository.loadMemoryFeedback(this.settings);
+    const persistedEntries = this.memoryRepository.loadPersistedShortTermEntries(this.settings);
+    const extracted = extractFailureFeedbackFromShortTermEntries([
+      ...persistedEntries,
+      ...this.sessionContext.sessionEvents,
+    ]);
+    return this.dedupeFeedbackEntries([...persistedFeedback, ...extracted]);
+  }
+
+  private summarizeStoredFragments(
+    prefix: string,
+    midTermFragments: Array<{ title: string; action: "created" | "updated" }>,
+    longTermFragments: Array<{ title: string; action: "created" | "updated" }>,
+  ): string {
+    const combined = [...midTermFragments, ...longTermFragments];
+    if (combined.length === 0) {
+      return `${prefix}. Keine relevanten Mid-/Long-Term-Fragmente gespeichert.`;
+    }
+
+    return `${prefix}. MTM ${midTermFragments.length}, LTM ${longTermFragments.length}: ${combined
+      .map((fragment) => `${fragment.title} [${fragment.action === "created" ? "neu" : "aktualisiert"}]`)
+      .join(" | ")}`;
+  }
+
+  private async handleMemoryRoundupCommand(): Promise<void> {
+    if (this.activeExecution) {
+      this.view.appendMessage("sys>", `Bereits aktiv: ${this.activeExecution.label}. Esc bricht die laufende Ausfuehrung ab.`);
+      return;
+    }
+
+    const [midTermFragments, longTermFragments] = await Promise.all([
+      this.memoryRepository.loadMidTermMemoryFragments(this.settings),
+      this.memoryRepository.loadLongTermMemoryFragments(this.settings),
+    ]);
+    const failureFeedback = this.collectFailureFeedback();
+    if (midTermFragments.length === 0 && longTermFragments.length === 0 && failureFeedback.length === 0) {
+      this.view.appendMessage("sys>", "Memory-Roundup beendet. Kein persistiertes Memory oder Feedback vorhanden.");
+      return;
+    }
+
+    const debugCollector = this.sessionContext.debugEnabled ? new DebugCollector() : undefined;
+    const roundupMessages = buildMemoryRoundupMessages(
+      midTermFragments,
+      longTermFragments,
+      this.memoryRepository.loadMemoryFeedback(this.settings),
+      failureFeedback,
+    );
+    this.view.setTransientStatus("Persistentes Memory wird ueberarbeitet", "request");
+    const execution = {
+      controller: new AbortController(),
+      label: "Memoryroundup",
+    };
+    this.activeExecution = execution;
+
+    try {
+      const result = await this.inferenceClient.createChatCompletion(
+        this.settings,
+        this.sessionContext.activeModelAlias,
+        roundupMessages,
+        debugCollector,
+        {
+          purpose: "memory_roundup",
+          scope: "memoryroundup",
+        },
+        undefined,
+        execution.controller.signal,
+      );
+      this.ensureExecutionNotAborted(execution.controller);
+      this.sessionContext.recordUsage(result.usage);
+      const parsed = parseMemoryRoundupResponse(
+        result.text,
+        Math.max(
+          this.settings.memory.midTerm.maxFragmentsPerSleep,
+          this.settings.memory.longTerm.maxFragmentsPerSleep,
+        ) * 2,
+      );
+      const merged = mergeConsolidationFragments(parsed);
+      const storedMidTermFragments = await this.memoryRepository.replaceMidTermMemoryFragments(
+        this.settings,
+        merged.midTermFragments,
+        debugCollector,
+      );
+      const storedLongTermFragments = await this.memoryRepository.replaceLongTermMemoryFragments(
+        this.settings,
+        merged.longTermFragments,
+        debugCollector,
+      );
+
+      this.view.clearTransientStatus();
+      this.view.appendMessage(
+        "sys>",
+        this.summarizeStoredFragments("Memory-Roundup abgeschlossen", storedMidTermFragments, storedLongTermFragments),
+      );
+    } catch (error) {
+      this.view.clearTransientStatus();
+      const message =
+        error instanceof InferenceError || error instanceof Error
+          ? error.message
+          : "Unbekannter Fehler bei /memoryroundup.";
+      this.memoryRepository.recordMemoryFeedback(this.settings, {
+        createdAt: new Date().toISOString(),
+        scope: "memoryroundup",
+        outcome: "failure",
+        message,
+      });
+      this.view.appendMessage("sys>", `Memory-Roundup fehlgeschlagen: ${message}`);
     } finally {
       if (this.activeExecution?.controller === execution.controller) {
         this.activeExecution = null;
@@ -779,6 +931,12 @@ export class ChatController {
             null,
             2,
           );
+          this.memoryRepository.recordMemoryFeedback(this.settings, {
+            createdAt: new Date().toISOString(),
+            scope: "tool",
+            outcome: "failure",
+            message: `${parsedResponse.call.tool}: ${message}`,
+          });
           this.view.clearTransientStatus();
           this.view.appendMessage("tool>", `Tool ${toolExecutionCount}: Fehler: ${message}`);
         }
@@ -844,6 +1002,12 @@ export class ChatController {
           modelAlias: this.sessionContext.activeModelAlias,
           success: false,
         },
+      });
+      this.memoryRepository.recordMemoryFeedback(this.settings, {
+        createdAt: new Date().toISOString(),
+        scope: "request",
+        outcome: "failure",
+        message,
       });
       this.view.appendMessage("sys>", message);
     } finally {
@@ -943,4 +1107,3 @@ export class ChatController {
     };
   }
 }
-

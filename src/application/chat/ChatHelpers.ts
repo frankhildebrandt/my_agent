@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import type { DebugSnapshot } from "../../debug";
 import type {
+  MemoryRoundupResponse,
   PromptDebugSegment,
   RequestDebugInfo,
   ScriptKnowledgeResponse,
@@ -9,6 +10,10 @@ import type {
 import type { ChatMessage } from "../../inference";
 import type {
   LongTermFragmentDraft,
+  MemoryFeedbackEntry,
+  PersistedMemoryFragment,
+  ShortTermConversationEntry,
+  SleepFeedbackEntry,
   ShortTermMemoryDebugInfo,
   TierMemoryDebugInfo,
 } from "../../memory";
@@ -24,7 +29,7 @@ interface ModelContextLimits {
 
 export function formatHelpMessage(commandPrefix: string): string {
   return [
-    `Verfuegbare Commands: ${commandPrefix}help, ${commandPrefix}new, ${commandPrefix}usage, ${commandPrefix}credits, ${commandPrefix}settings, ${commandPrefix}models, ${commandPrefix}use <alias>, ${commandPrefix}debug, ${commandPrefix}reset, ${commandPrefix}sleep, ${commandPrefix}sleepquiet, ${commandPrefix}memoryreset, ${commandPrefix}quit`,
+    `Verfuegbare Commands: ${commandPrefix}help, ${commandPrefix}new, ${commandPrefix}usage, ${commandPrefix}credits, ${commandPrefix}settings, ${commandPrefix}models, ${commandPrefix}use <alias>, ${commandPrefix}debug, ${commandPrefix}reset, ${commandPrefix}sleep, ${commandPrefix}sleepquiet, ${commandPrefix}memoryroundup, ${commandPrefix}memoryreset, ${commandPrefix}quit`,
     `${commandPrefix}new und ${commandPrefix}reset setzen die aktuelle Session zurueck.`,
   ].join(" ");
 }
@@ -138,7 +143,7 @@ function normalizeJsonResponse(value: string): string {
   return trimmed.replace(/^```(?:json)?\s*/u, "").replace(/\s*```$/u, "").trim();
 }
 
-export function parseSleepConsolidationResponse(
+function parseConsolidationResponse(
   rawResponse: string,
   maxFragments: number,
 ): SleepConsolidationResponse {
@@ -147,6 +152,12 @@ export function parseSleepConsolidationResponse(
   const fragments = Array.isArray(parsed.fragments) ? parsed.fragments : [];
   const midTermFragments = Array.isArray(parsed.midTermFragments) ? parsed.midTermFragments : [];
   const longTermFragments = Array.isArray(parsed.longTermFragments) ? parsed.longTermFragments : [];
+  const problemMidTermFragments = Array.isArray(parsed.problemMidTermFragments)
+    ? parsed.problemMidTermFragments
+    : [];
+  const problemLongTermFragments = Array.isArray(parsed.problemLongTermFragments)
+    ? parsed.problemLongTermFragments
+    : [];
   const toFragmentList = (items: unknown[]): LongTermFragmentDraft[] =>
     items
       .filter((fragment): fragment is LongTermFragmentDraft => {
@@ -162,6 +173,34 @@ export function parseSleepConsolidationResponse(
   return {
     midTermFragments: toFragmentList(midTermFragments.length > 0 ? midTermFragments : fragments),
     longTermFragments: toFragmentList(longTermFragments),
+    problemMidTermFragments: toFragmentList(problemMidTermFragments),
+    problemLongTermFragments: toFragmentList(problemLongTermFragments),
+  };
+}
+
+export function parseSleepConsolidationResponse(
+  rawResponse: string,
+  maxFragments: number,
+): SleepConsolidationResponse {
+  return parseConsolidationResponse(rawResponse, maxFragments);
+}
+
+export function parseMemoryRoundupResponse(
+  rawResponse: string,
+  maxFragments: number,
+): MemoryRoundupResponse {
+  return parseConsolidationResponse(rawResponse, maxFragments);
+}
+
+export function mergeConsolidationFragments(response: {
+  midTermFragments: LongTermFragmentDraft[];
+  longTermFragments: LongTermFragmentDraft[];
+  problemMidTermFragments?: LongTermFragmentDraft[];
+  problemLongTermFragments?: LongTermFragmentDraft[];
+}): { midTermFragments: LongTermFragmentDraft[]; longTermFragments: LongTermFragmentDraft[] } {
+  return {
+    midTermFragments: [...response.midTermFragments, ...(response.problemMidTermFragments ?? [])],
+    longTermFragments: [...response.longTermFragments, ...(response.problemLongTermFragments ?? [])],
   };
 }
 
@@ -233,20 +272,66 @@ export function buildScriptKnowledgeMessages(
   ];
 }
 
-export function buildSleepMessages(snapshot: string): ChatMessage[] {
+function formatMemoryFeedback(entries: MemoryFeedbackEntry[]): string {
+  if (entries.length === 0) {
+    return "";
+  }
+
+  return [
+    "Persistierte negative Erfahrungen und Problemhinweise:",
+    ...entries.map(
+      (entry, index) => `${index + 1}. [${entry.scope}/${entry.outcome}] ${entry.createdAt}: ${entry.message}`,
+    ),
+  ].join("\n");
+}
+
+function formatFailureSignals(entries: MemoryFeedbackEntry[]): string {
+  if (entries.length === 0) {
+    return "";
+  }
+
+  return [
+    "Aktuelle Failure-Signale aus dem Short-Term-Memory:",
+    ...entries.map(
+      (entry, index) => `${index + 1}. [${entry.scope}/${entry.outcome}] ${entry.createdAt}: ${entry.message}`,
+    ),
+  ].join("\n");
+}
+
+function formatTierFragmentsForRoundup(label: string, fragments: PersistedMemoryFragment[]): string {
+  if (fragments.length === 0) {
+    return `${label}:\n(keine Fragmente)`;
+  }
+
+  return [
+    `${label}:`,
+    ...fragments.map(
+      (fragment, index) =>
+        `${index + 1}. ${fragment.title} [${fragment.updatedAt}]\n${fragment.content}`,
+    ),
+  ].join("\n\n");
+}
+
+export function buildSleepMessages(
+  snapshot: string,
+  feedbackEntries: SleepFeedbackEntry[] = [],
+  failureSignals: MemoryFeedbackEntry[] = [],
+): ChatMessage[] {
   return [
     {
       role: "system",
       content: [
         "Du verdichtest Short-Term-Memory in kleines, wiederverwendbares Long-Term-Memory.",
         "Antworte ausschliesslich mit genau einem JSON-Objekt ohne Markdown.",
-        'Format: {"midTermFragments":[{"title":"...","content":"..."}],"longTermFragments":[{"title":"...","content":"..."}]}',
+        'Format: {"midTermFragments":[{"title":"...","content":"..."}],"longTermFragments":[{"title":"...","content":"..."}],"problemMidTermFragments":[{"title":"...","content":"..."}],"problemLongTermFragments":[{"title":"...","content":"..."}]}',
         "Regeln:",
         "- midTermFragments sind verdichtete, relevante Erinnerungen mit begrenzter Haltbarkeit. Sie sollen Dubletten ersetzen und das aktuell nuetzliche Arbeitswissen kompakt halten.",
         "- longTermFragments sind nur wirklich bewaehrte, sichere Learnings: Vorgehen, Konventionen oder Erkenntnisse, die bereits schnell zu guten Ergebnissen gefuehrt haben.",
+        "- problemMidTermFragments und problemLongTermFragments halten negative Erfahrungen fest, aber nur dann, wenn daraus konkrete Gegenmassnahmen, Warnsignale oder robustere Vorgehensweisen abgeleitet werden koennen.",
         "- Wenn in der Session Tools oder Hilfsskripte erzeugt, angepasst oder erfolgreich benutzt wurden, sollen diese bevorzugt als eigene Memory-Fragmente festgehalten werden.",
         "- Solche Fragmente muessen die konkreten Namen der Tools oder Skripte nennen und knapp erklaeren, wie sie funktionieren, welche Eingaben oder Parameter sie erwarten und wofuer sie geeignet sind.",
         "- Bewaehrte, mehrfach nuetzliche Tools und Skripte gehoeren bevorzugt in longTermFragments; einmalig relevante Tool-Kontexte eher in midTermFragments.",
+        "- Wenn Fehlversuche, gescheiterte Anfragen, Script-Probleme oder Zielverfehlungen erkennbar sind, fasse sie als problemorientierte Learnings zusammen: Problem, Ausloeser, Gegenmassnahme.",
         "- Ein longTermFragment ist nur dann sinnvoll, wenn es gegenueber Weglassen klaren Mehrwert bringt und dabei moeglichst wenig Tokens kostet.",
         "- Verwirf longTerm-Kandidaten, die nur eine allgemeine Beobachtung wiederholen, keinen konkreten Skript-/Tool-Namen nennen oder keine stabile wiederverwendbare Regel enthalten.",
         "- Wenn ein Tool- oder Skript-Learning ohne den konkreten Namen wie z. B. einer Datei oder eines Tool-Identifiers nicht nuetzlich waere, dann speichere es gar nicht.",
@@ -254,13 +339,138 @@ export function buildSleepMessages(snapshot: string): ChatMessage[] {
         "- Verwirf fluechtige Aufgaben, Rohlogs, Tool-Rauschen und Wiederholungen.",
         "- Wenn ein longTermFragment erzeugt wird, soll es nicht zusaetzlich identisch in midTermFragments wiederholt werden.",
         "- Wenn nichts fuer einen Tier relevant ist, liefere dort ein leeres Array.",
+        "- Falls fruehere Sleep-Fehlschlaege genannt werden, vermeide dieselben Fehler aktiv und liefere besonders sauberes, parsebares JSON.",
       ].join("\n"),
     },
     {
       role: "user",
-      content: snapshot,
+      content: [
+        formatMemoryFeedback(feedbackEntries),
+        formatFailureSignals(failureSignals),
+        snapshot,
+      ]
+        .filter((part) => part.trim().length > 0)
+        .join("\n\n"),
     },
   ];
+}
+
+export function buildMemoryRoundupMessages(
+  midTermFragments: PersistedMemoryFragment[],
+  longTermFragments: PersistedMemoryFragment[],
+  feedbackEntries: MemoryFeedbackEntry[] = [],
+  failureSignals: MemoryFeedbackEntry[] = [],
+): ChatMessage[] {
+  return [
+    {
+      role: "system",
+      content: [
+        "Du ueberarbeitest das gesamte persistierte Agent-Memory vollstaendig.",
+        "Antworte ausschliesslich mit genau einem JSON-Objekt ohne Markdown.",
+        'Format: {"midTermFragments":[{"title":"...","content":"..."}],"longTermFragments":[{"title":"...","content":"..."}],"problemMidTermFragments":[{"title":"...","content":"..."}],"problemLongTermFragments":[{"title":"...","content":"..."}]}',
+        "Regeln:",
+        "- Fuehre aehnliche oder redundante Fragmente zusammen und wirf veraltete oder schwache Fragmente weg.",
+        "- Halte Mid-Term-Memory kompakt und arbeitsnah.",
+        "- Long-Term-Memory soll nur stabile, wiederverwendbare Regeln, bewaehrte Workflows oder robuste Tool-/Skript-Learnings enthalten.",
+        "- Negative Erfahrungen sollen nicht nur erwaehnt, sondern als problemorientierte Learnings mit klaren Gegenmassnahmen formuliert werden.",
+        "- Wenn mehrere Fehlversuche auf dasselbe Muster hindeuten, fasse sie in ein staerkeres Problemfragment zusammen.",
+        "- Problemfragmente gehoeren nur dann nach longTermFragments, wenn die Gegenmassnahme stabil und wiederverwendbar ist.",
+        "- Nenne konkrete Tools, Skripte, Dateitypen, Request-Muster oder Ausloeser, wenn sie fuer die Gegenmassnahme wichtig sind.",
+        "- Liefere ein vollstaendiges Ersatz-Set fuer Mid-Term und Long-Term. Alles Relevante muss in deinen Arrays enthalten sein.",
+        "- Vermeide Dubletten zwischen midTermFragments/problemMidTermFragments und longTermFragments/problemLongTermFragments.",
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: [
+        formatMemoryFeedback(feedbackEntries),
+        formatFailureSignals(failureSignals),
+        formatTierFragmentsForRoundup("Aktuelles Mid-Term-Memory", midTermFragments),
+        formatTierFragmentsForRoundup("Aktuelles Long-Term-Memory", longTermFragments),
+      ]
+        .filter((part) => part.trim().length > 0)
+        .join("\n\n"),
+    },
+  ];
+}
+
+function buildFeedbackMessage(
+  createdAt: string,
+  scope: MemoryFeedbackEntry["scope"],
+  outcome: MemoryFeedbackEntry["outcome"],
+  message: string,
+): MemoryFeedbackEntry {
+  return {
+    createdAt,
+    scope,
+    outcome,
+    message: message.trim(),
+  };
+}
+
+function readErrorMessage(value: unknown): string {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  if (typeof value !== "object" || value === null) {
+    return "";
+  }
+  const candidate = value as { error?: unknown; output?: { error?: unknown }; summary?: unknown };
+  return (
+    readErrorMessage(candidate.error) ||
+    readErrorMessage(candidate.output?.error) ||
+    (typeof candidate.summary === "string" ? candidate.summary.trim() : "")
+  );
+}
+
+export function extractFailureFeedbackFromShortTermEntries(
+  entries: ShortTermConversationEntry[],
+): MemoryFeedbackEntry[] {
+  const collected: MemoryFeedbackEntry[] = [];
+  const seen = new Set<string>();
+
+  for (const entry of entries) {
+    const createdAt = entry.createdAt;
+    if (entry.kind === "tool_result") {
+      const metadata = typeof entry.metadata === "object" && entry.metadata !== null ? entry.metadata : {};
+      const success = (metadata as { success?: unknown }).success;
+      if (success === false) {
+        const toolName = typeof (metadata as { tool?: unknown }).tool === "string"
+          ? String((metadata as { tool?: unknown }).tool)
+          : "unbekanntes Tool";
+        const result = (metadata as { result?: unknown }).result;
+        const errorMessage = readErrorMessage(result) || entry.content;
+        const message = `Tool ${toolName} fehlgeschlagen. Gegenmassnahme ableiten: ${errorMessage}`;
+        const key = `tool:${message}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          collected.push(buildFeedbackMessage(createdAt, "tool", "failure", message));
+        }
+      }
+      continue;
+    }
+
+    if (entry.kind === "status" && /fehlgeschlagen/i.test(entry.content)) {
+      const key = `status:${entry.content}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        collected.push(buildFeedbackMessage(createdAt, "request", "failure", entry.content));
+      }
+      continue;
+    }
+
+    if (entry.kind === "loop_correction") {
+      const outcome: MemoryFeedbackEntry["outcome"] =
+        /nachgefordert|ungueltig|ohne tool/i.test(entry.content) ? "goal_missed" : "failure";
+      const key = `loop:${entry.content}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        collected.push(buildFeedbackMessage(createdAt, "goal", outcome, entry.content));
+      }
+    }
+  }
+
+  return collected;
 }
 
 function formatPromptSegments(segments: PromptDebugSegment[]): string {
@@ -361,4 +571,3 @@ export function renderDebugReport(requestDebug: RequestDebugInfo, snapshot: Debu
     formatPromptSegments(requestDebug.promptSegments),
   ].join("\n\n");
 }
-

@@ -4,7 +4,7 @@
   },
   "chat": {
     "inputLabel": "Prompt",
-    "welcomeMessage": "Chat initialisiert. Commands starten mit '/'. Verfuegbar: /help, /new, /usage, /credits, /settings, /models, /use <alias>, /debug, /reset, /sleep, /sleepquiet, /memoryreset, /quit. Tool-Loop fuer agent_scripts ist aktiv."
+    "welcomeMessage": "Chat initialisiert. Commands starten mit '/'. Verfuegbar: /help, /new, /usage, /credits, /settings, /models, /use <alias>, /debug, /reset, /sleep, /sleepquiet, /memoryroundup, /memoryreset, /quit. Tool-Loop fuer agent_scripts ist aktiv."
   },
   "editor": {
     "command": "default"
@@ -76,6 +76,16 @@
       "maxTotalChars": 4000,
       "maxFragmentsPerSleep": 8
     }
+  },
+  "modules": {
+    "dir": "/Users/frankhildebrandt/Library/Application Support/Stackriot/Worktrees/my_agent/base/agent_modules",
+    "socketTimeoutMs": 8000,
+    "startupTimeoutMs": 20000,
+    "discoveryTopK": 5,
+    "maxPromptModules": 3,
+    "autoStartOnCall": true,
+    "includeModuleDetailsInPrompt": false,
+    "maxResponseBytes": 131072
   },
   "scriptRegistry": {
     "path": "/Users/frankhildebrandt/Library/Application Support/Stackriot/Worktrees/my_agent/base/agent_scripts/registry.json",

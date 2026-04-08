@@ -1,8 +1,13 @@
 import type { DebugCollector } from "../debug";
 import type { AppSettings } from "../settings";
+import { bootstrapAgentModuleTool } from "./definitions/bootstrapAgentModule";
+import { callAgentModuleTool } from "./definitions/callAgentModule";
 import { CreateTypescriptFileTool, createTypescriptFileTool } from "./definitions/createTypescriptFile";
+import { discoverAgentModulesTool } from "./definitions/discoverAgentModules";
 import { QueryScriptRegistryTool, queryScriptRegistryTool } from "./definitions/queryScriptRegistry";
 import { RunTypescriptFileTool, runTypescriptFileTool } from "./definitions/runTypescriptFile";
+import { startAgentModuleTool } from "./definitions/startAgentModule";
+import { stopAgentModuleTool } from "./definitions/stopAgentModule";
 import type {
   AgentToolDefinition,
   ToolCall,
@@ -18,6 +23,11 @@ export class ToolRegistry {
     queryScriptRegistryTool,
     createTypescriptFileTool,
     runTypescriptFileTool,
+    discoverAgentModulesTool,
+    startAgentModuleTool,
+    stopAgentModuleTool,
+    callAgentModuleTool,
+    bootstrapAgentModuleTool,
   ]) {
     this.registeredTools = [...registeredTools];
   }

@@ -17,11 +17,13 @@
     "@types/blessed": "^0.1.27",
     "@types/node": "^25.5.2",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.3"
   },
   "dependencies": {
     "blessed": "^0.1.81",
     "ddgs": "^1.0.4",
+    "playwright": "^1.59.1",
+    "puppeteer": "^24.40.0",
     "vectra": "^0.14.0"
   }
 }

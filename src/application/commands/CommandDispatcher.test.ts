@@ -35,6 +35,9 @@ test("CommandDispatcher dispatches known commands and passes aliases", async () 
     onSleep: (quiet) => {
       calls.push(quiet ? "sleepquiet" : "sleep");
     },
+    onMemoryRoundup: () => {
+      calls.push("memoryroundup");
+    },
     onMemoryReset: () => {
       calls.push("memoryreset");
     },
@@ -48,8 +51,9 @@ test("CommandDispatcher dispatches known commands and passes aliases", async () 
 
   assert.equal(await dispatcher.dispatch("/use openai-default"), true);
   assert.equal(await dispatcher.dispatch("/sleepquiet"), true);
+  assert.equal(await dispatcher.dispatch("/memoryroundup"), true);
   assert.equal(await dispatcher.dispatch("plain text"), false);
-  assert.deepEqual(calls, ["use:openai-default", "sleepquiet"]);
+  assert.deepEqual(calls, ["use:openai-default", "sleepquiet", "memoryroundup"]);
 });
 
 test("CommandDispatcher routes unknown commands", async () => {
@@ -65,6 +69,7 @@ test("CommandDispatcher routes unknown commands", async () => {
     onDebug: () => undefined,
     onReset: () => undefined,
     onSleep: () => undefined,
+    onMemoryRoundup: () => undefined,
     onMemoryReset: () => undefined,
     onQuit: () => undefined,
     onUnknown: (raw) => {

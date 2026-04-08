@@ -37,6 +37,7 @@ Aktuell sind dort insbesondere diese Bereiche hinterlegt:
 - `editor.command` fuer einen optionalen expliziten Editor-Befehl
 - `files.settingsPath` als Ziel fuer `/settings`
 - `llm.*` fuer Provider-, Modell- und Prompt-Konfiguration
+- `modules.*` fuer Discovery, Socket-Kommunikation und Laufzeitverhalten der Agent-Module
 - `tools.*` fuer lokale Agent-Tools und deren Roundtrip-Limits
 - `ui.title` fuer den TUI-Titel
 
@@ -76,8 +77,9 @@ Alternativ kann im Projektverzeichnis eine `.env` liegen. Sie wird beim Start au
 - `/use <alias>` wechselt das aktive Modell fuer die laufende Session
 - `/debug` schaltet einen session-lokalen Debug-Modus an oder aus; bei aktiver Option zeigt die TUI zusaetzlich Embedding-Aufrufe, genutzte Memory-Bloecke und den segmentierten effektiven Prompt
 - `/reset` leert Session und `short_term_memory`, laesst `mid_term_memory` und `long_term_memory` aber unberuehrt
-- `/sleep` verdichtet `short_term_memory` per LLM in dedupliziertes `mid_term_memory` und in strengere, bewaehrte `long_term_memory`-Fragmente; dabei sollen insbesondere erzeugte oder benutzte Tools und Hilfsskripte mit Namen, Zweck, Parametern und Funktionsweise kompakt festgehalten werden; danach wird die Session geleert
+- `/sleep` verdichtet `short_term_memory` per LLM in dedupliziertes `mid_term_memory` und in strengere, bewaehrte `long_term_memory`-Fragmente; dabei sollen insbesondere erzeugte oder benutzte Tools und Hilfsskripte mit Namen, Zweck, Parametern und Funktionsweise kompakt festgehalten werden; negative Erfahrungen wie fehlgeschlagene Scripts, fehlgeschlagene Requests oder Zielverfehlungen werden als Gegenmassnahmen in den Memory-Zyklus uebernommen; danach wird die Session geleert
 - `/sleepquiet` verhaelt sich wie `/sleep`, zeigt aber nur eine knappe Erfolgsmeldung
+- `/memoryroundup` liest das komplette persistierte Mid-/Long-Term-Memory sowie Failure-Signale aus dem Short-Term-Memory, fasst aehnliche Inhalte zusammen, entfernt Dubletten und schreibt ein vollstaendig ueberarbeitetes Mid-/Long-Term-Memory zurueck
 - `/memoryreset` leert `short_term_memory`, `mid_term_memory` und `long_term_memory` komplett
 - `/quit` beendet die TUI sauber; entspricht funktional `Ctrl+C`
 
@@ -98,6 +100,14 @@ Aktuell sind drei Tools registriert:
 - `create_typescript_file` erzeugt `.ts`-Dateien innerhalb von `tools.scriptsDir` und veroeffentlicht sie mit Hilfetext in der Registry
 - `run_typescript_file` fuehrt diese Dateien mit `tsx` aus und gibt `stdout`, `stderr`, Exitcode und Timeout-Status an das Modell zurueck
 
+Zusätzlich gibt es jetzt Modul-Tools fuer Worker unter `./agent_modules`:
+
+- `discover_agent_modules` findet installierte Module und liefert kompakte Capability-Summaries
+- `start_agent_module` startet ein Modul ueber `npm run start` und wartet auf Socket plus Handshake
+- `stop_agent_module` beendet ein zuvor gestartetes Modul
+- `call_agent_module` sendet JSON-Lines-Requests an ein laufendes oder bei Bedarf automatisch gestartetes Modul
+- `bootstrap_agent_module` erzeugt ein TypeScript-Modulgeruest inklusive Manifest, Socket-Server und Architektur-Prompt
+
 Die Loop endet, sobald das Modell eine finale Antwort liefert oder `tools.maxRoundtrips` erreicht ist.
 
 ### Script Registry
@@ -105,6 +115,28 @@ Die Loop endet, sobald das Modell eine finale Antwort liefert oder `tools.maxRou
 Die Script-Registry liegt standardmaessig in `./agent_scripts/registry.json`. Der zugehoerige `vectra`-Index liegt standardmaessig in `./agent_scripts/registry_index`.
 
 Neue Skripte werden beim Tool `create_typescript_file` zusammen mit einem kurzen Hilfetext dort veroeffentlicht. `query_script_registry` kann diese Eintraege spaeter wiederfinden und nutzt dafuer bevorzugt den `vectra`-Index ueber Pfad plus Hilfetext; wenn kein Embedding oder kein Index-Treffer verfuegbar ist, faellt die Suche auf einfache Textbewertung zurueck.
+
+### Agent Modules
+
+TypeScript-basierte Worker leben unter `./agent_modules/<modulname>/` und besitzen eine eigene `package.json` mit separaten npm-Dependencies.
+
+Der Host-Agent discovert Module zweistufig:
+
+- offline ueber `./agent_modules/<modulname>/module.json`
+- online ueber einen Handshake nach Socket-Verbindung
+
+Module werden ueber `npm run start` im Modulverzeichnis gestartet. Der erwartete Socket liegt standardmaessig unter `./agent_modules/<modulname>.sock`. Die Kommunikation laeuft ueber JSON Lines mit Requests wie `{id,type:"request",action,payload}` und Responses wie `{id,type:"response",ok,payload,error}`.
+
+Wichtige Settings:
+
+- `modules.dir` definiert das Modul-Root-Verzeichnis
+- `modules.socketTimeoutMs` begrenzt einzelne Socket-Requests
+- `modules.startupTimeoutMs` begrenzt den Start inkl. Handshake
+- `modules.discoveryTopK` begrenzt Discovery-Treffer
+- `modules.maxPromptModules` begrenzt, wie viele Modulhinweise kompakt in Tool-Ergebnissen landen
+- `modules.autoStartOnCall` erlaubt impliziten Modulstart vor einem Call
+- `modules.includeModuleDetailsInPrompt` steuert, ob Discovery standardmaessig Details statt Kurzfassungen liefert
+- `modules.maxResponseBytes` begrenzt die maximale Antwortgroesse pro Modulaufruf
 
 ### Agent Memory
 
@@ -118,9 +150,9 @@ Das zentrale Ziel ist kleine Prompts. Vor jeder Nutzeranfrage werden nur die rel
 
 Mit `/debug` kann die TUI diese Auswahl sichtbar machen. Der Modus zeigt nur Beobachtungsdaten an: verwendete Embedding-Requests, Retrieval-Pfad fuer Mid-/Long-Term-Memory und den nach Segmenten getrennten Prompt. Die eigentliche Ranking-, Tool- und Prompt-Logik wird dadurch nicht veraendert.
 
-Persistentes Wissen wird nicht mehr direkt per Tool geschrieben. Stattdessen landet neuer Kontext zuerst im `short_term_memory` und wird erst mit `/sleep` oder `/sleepquiet` in `mid_term_memory` und gegebenenfalls zusaetzlich in `long_term_memory` hochgestuft.
+Persistentes Wissen wird nicht mehr direkt per Tool geschrieben. Stattdessen landet neuer Kontext zuerst im `short_term_memory` und wird erst mit `/sleep` oder `/sleepquiet` in `mid_term_memory` und gegebenenfalls zusaetzlich in `long_term_memory` hochgestuft. `/memoryroundup` ist der separate Voll-Review-Pfad, der bereits gespeichertes Mid-/Long-Term-Memory komplett neu strukturiert.
 
-Das persistierte `short_term_memory` speichert neben Nutzer- und Assistententext auch strukturierte Telemetrie zu Model-Requests und -Responses, Reasoning, Tool-Calls, Tool-Ergebnissen, Erfolgs-/Fehlerstatus und Token-Usage. Fuer das eigentliche Prompt-Kontextfenster wird daraus weiterhin nur ein kompaktes Snapshot gebaut, damit die gespeicherten Rohdaten das Kontextlimit nicht sprengen.
+Das persistierte `short_term_memory` speichert neben Nutzer- und Assistententext auch strukturierte Telemetrie zu Model-Requests und -Responses, Reasoning, Tool-Calls, Tool-Ergebnissen, Erfolgs-/Fehlerstatus, Zielabweichungen, Feedback-Eintraegen und Token-Usage. Streaming-Completion-Chunks werden dabei nicht mehr roh abgelegt, sondern zu kompakten Summaries verdichtet. Fuer das eigentliche Prompt-Kontextfenster wird daraus weiterhin nur ein kompaktes Snapshot gebaut, damit die gespeicherten Rohdaten das Kontextlimit nicht sprengen.
 
 Wichtige Settings:
 

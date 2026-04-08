@@ -61,6 +61,14 @@ interface EmbeddingResponse {
   };
 }
 
+interface StreamChunkSummary {
+  chunkCount: number;
+  textChunkCount: number;
+  reasoningChunkCount: number;
+  usageChunkCount: number;
+  errorChunkCount: number;
+}
+
 function extractTextFragment(value: unknown): string {
   if (typeof value === "string") {
     return value;
@@ -112,6 +120,63 @@ function extractUsage(response: ChatCompletionResponse): InferenceResult["usage"
     inputTokens: typeof promptTokens === "number" ? promptTokens : null,
     outputTokens: typeof completionTokens === "number" ? completionTokens : null,
     totalTokens: typeof totalTokens === "number" ? totalTokens : null,
+  };
+}
+
+function summarizeStreamChunks(rawChunks: ChatCompletionStreamResponse[]): StreamChunkSummary {
+  return rawChunks.reduce<StreamChunkSummary>(
+    (summary, chunk) => {
+      const delta = chunk.choices?.[0]?.delta;
+      if (extractTextFragment(delta?.content).length > 0) {
+        summary.textChunkCount += 1;
+      }
+      if (
+        (extractTextFragment(delta?.reasoning_content) || extractTextFragment(delta?.reasoning)).length > 0
+      ) {
+        summary.reasoningChunkCount += 1;
+      }
+      if (chunk.usage) {
+        summary.usageChunkCount += 1;
+      }
+      if (chunk.error?.message) {
+        summary.errorChunkCount += 1;
+      }
+      summary.chunkCount += 1;
+      return summary;
+    },
+    {
+      chunkCount: 0,
+      textChunkCount: 0,
+      reasoningChunkCount: 0,
+      usageChunkCount: 0,
+      errorChunkCount: 0,
+    },
+  );
+}
+
+export function summarizeChatCompletionRawResponse(
+  payload: ChatCompletionResponse | ChatCompletionStreamResponse[],
+  text: string,
+  reasoning: string,
+  usage: InferenceResult["usage"],
+): Record<string, unknown> {
+  if (Array.isArray(payload)) {
+    return {
+      mode: "stream",
+      text,
+      reasoning,
+      usage,
+      chunks: summarizeStreamChunks(payload),
+    };
+  }
+
+  return {
+    mode: "single",
+    text,
+    reasoning,
+    usage,
+    hasChoices: Array.isArray(payload.choices) && payload.choices.length > 0,
+    hasError: typeof payload.error?.message === "string" && payload.error.message.length > 0,
   };
 }
 
@@ -385,6 +450,8 @@ export class OpenAiCompatibleInferenceClient implements IInferenceClient, IEmbed
       }
 
       const usage = payload ? extractUsage(payload) : streamPayload?.usage ?? extractUsage({});
+      const text = payload ? extractText(payload) : streamPayload?.text ?? "";
+      const reasoning = payload ? extractReasoning(payload).trim() : streamPayload?.reasoning ?? "";
       debugCollector?.recordChat({
         kind: "chat",
         timestamp: new Date().toISOString(),
@@ -404,11 +471,11 @@ export class OpenAiCompatibleInferenceClient implements IInferenceClient, IEmbed
         modelAlias,
         providerName,
         providerModelId: modelConfig.model,
-        text: payload ? extractText(payload) : streamPayload?.text ?? "",
-        reasoning: payload ? extractReasoning(payload).trim() : streamPayload?.reasoning ?? "",
+        text,
+        reasoning,
         usage,
         requestBody,
-        rawResponse: payload ?? streamPayload?.rawChunks ?? [],
+        rawResponse: summarizeChatCompletionRawResponse(payload ?? streamPayload?.rawChunks ?? [], text, reasoning, usage),
       };
     } catch (error) {
       if (error instanceof InferenceError) {

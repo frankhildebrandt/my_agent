@@ -46,6 +46,16 @@ export interface AppSettings {
       maxFragmentsPerSleep: number;
     };
   };
+  modules: {
+    dir: string;
+    socketTimeoutMs: number;
+    startupTimeoutMs: number;
+    discoveryTopK: number;
+    maxPromptModules: number;
+    autoStartOnCall: boolean;
+    includeModuleDetailsInPrompt: boolean;
+    maxResponseBytes: number;
+  };
   scriptRegistry: {
     path: string;
     indexPath: string;
@@ -88,7 +98,7 @@ export const defaultSettings: AppSettings = {
   chat: {
     inputLabel: "Prompt",
     welcomeMessage:
-      "Chat initialisiert. Commands starten mit '/'. Verfuegbar: /help, /new, /usage, /credits, /settings, /models, /use <alias>, /debug, /reset, /sleep, /sleepquiet, /memoryreset, /quit. Tool-Loop fuer agent_scripts ist aktiv.",
+      "Chat initialisiert. Commands starten mit '/'. Verfuegbar: /help, /new, /usage, /credits, /settings, /models, /use <alias>, /debug, /reset, /sleep, /sleepquiet, /memoryroundup, /memoryreset, /quit. Tool-Loop fuer agent_scripts ist aktiv.",
   },
   editor: {
     command: "default",
@@ -161,6 +171,16 @@ export const defaultSettings: AppSettings = {
       maxTotalChars: 4000,
       maxFragmentsPerSleep: 8,
     },
+  },
+  modules: {
+    dir: "./agent_modules",
+    socketTimeoutMs: 8_000,
+    startupTimeoutMs: 20_000,
+    discoveryTopK: 5,
+    maxPromptModules: 3,
+    autoStartOnCall: true,
+    includeModuleDetailsInPrompt: false,
+    maxResponseBytes: 131_072,
   },
   scriptRegistry: {
     path: "./agent_scripts/registry.json",

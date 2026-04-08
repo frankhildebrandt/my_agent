@@ -16,9 +16,18 @@ import type {
 } from "../inference";
 import type {
   LongTermFragmentDraft,
+  MemoryFeedbackEntry,
+  PersistedMemoryFragment,
+  SleepFeedbackEntry,
   ShortTermConversationEntry,
   StoredLongTermFragment,
 } from "../memory";
+import type {
+  AgentModuleCallResponse,
+  AgentModuleDiscoveryEntry,
+  BootstrapAgentModuleOptions,
+  DiscoverAgentModulesOptions,
+} from "../modules";
 import type { AppSettings } from "../settings";
 import type {
   ToolCall,
@@ -68,6 +77,11 @@ export interface IEmbeddingClient {
 export interface IMemoryRepository {
   appendShortTermMemory(settings: AppSettings, entry: ShortTermConversationEntry): void;
   clearShortTermMemory(settings: AppSettings): void;
+  loadMemoryFeedback(settings: AppSettings): MemoryFeedbackEntry[];
+  recordMemoryFeedback(settings: AppSettings, entry: MemoryFeedbackEntry): void;
+  loadSleepFeedback(settings: AppSettings): SleepFeedbackEntry[];
+  recordSleepFeedback(settings: AppSettings, entry: SleepFeedbackEntry): void;
+  loadPersistedShortTermEntries(settings: AppSettings): ShortTermConversationEntry[];
   loadShortTermMemorySnapshot(settings: AppSettings, entries: ShortTermConversationEntry[]): string;
   loadShortTermMemorySnapshotWithDebug(
     settings: AppSettings,
@@ -93,6 +107,18 @@ export interface IMemoryRepository {
     fragments: LongTermFragmentDraft[],
     debugCollector?: DebugCollector,
   ): Promise<StoredLongTermFragment[]>;
+  loadMidTermMemoryFragments(settings: AppSettings): Promise<PersistedMemoryFragment[]>;
+  loadLongTermMemoryFragments(settings: AppSettings): Promise<PersistedMemoryFragment[]>;
+  replaceMidTermMemoryFragments(
+    settings: AppSettings,
+    fragments: LongTermFragmentDraft[],
+    debugCollector?: DebugCollector,
+  ): Promise<StoredLongTermFragment[]>;
+  replaceLongTermMemoryFragments(
+    settings: AppSettings,
+    fragments: LongTermFragmentDraft[],
+    debugCollector?: DebugCollector,
+  ): Promise<StoredLongTermFragment[]>;
   resetAllMemory(settings: AppSettings): void;
 }
 
@@ -104,6 +130,34 @@ export interface IScriptRegistryRepository {
     usage: string,
     debugCollector?: DebugCollector,
   ): Promise<{ embeddingUsed: boolean }>;
+}
+
+export interface IAgentModuleService {
+  bootstrap(
+    settings: AppSettings,
+    moduleName: string,
+    options?: BootstrapAgentModuleOptions,
+  ): Promise<{
+    createdFiles: string[];
+    installed: boolean;
+    module: AgentModuleDiscoveryEntry;
+    started: boolean;
+  }>;
+  call(
+    settings: AppSettings,
+    moduleName: string,
+    action: string,
+    payload?: unknown,
+    timeoutMs?: number,
+  ): Promise<{
+    action: string;
+    autoStarted: boolean;
+    module: AgentModuleDiscoveryEntry;
+    response: AgentModuleCallResponse;
+  }>;
+  discover(settings: AppSettings, options?: DiscoverAgentModulesOptions): AgentModuleDiscoveryEntry[];
+  start(settings: AppSettings, moduleName: string): Promise<AgentModuleDiscoveryEntry>;
+  stop(settings: AppSettings, moduleName: string): Promise<AgentModuleDiscoveryEntry>;
 }
 
 export interface IToolExecutor {

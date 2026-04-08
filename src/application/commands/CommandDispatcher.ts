@@ -11,6 +11,7 @@ export interface CommandHandlers {
   onDebug(): Promise<void> | void;
   onReset(): Promise<void> | void;
   onSleep(quiet: boolean): Promise<void> | void;
+  onMemoryRoundup(): Promise<void> | void;
   onMemoryReset(): Promise<void> | void;
   onQuit(): Promise<void> | void;
   onUnknown(rawCommand: string): Promise<void> | void;
@@ -55,6 +56,8 @@ export class CommandDispatcher {
       await this.handlers.onSleep(false);
     } else if (command === "sleepquiet") {
       await this.handlers.onSleep(true);
+    } else if (command === "memoryroundup") {
+      await this.handlers.onMemoryRoundup();
     } else if (command === "memoryreset") {
       await this.handlers.onMemoryReset();
     } else if (command === "quit") {
@@ -70,4 +73,3 @@ export class CommandDispatcher {
     return formatHelpMessage(this.prefix);
   }
 }
-
