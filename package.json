@@ -1,0 +1,27 @@
+{
+  "name": "my_agent",
+  "version": "0.1.0",
+  "description": "Ein selbst erweiternder KI-Agent in TypeScript.",
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "check": "tsc --project tsconfig.json --noEmit",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "node --import tsx --test $(find src -name '*.test.ts' -print) && npm run check"
+  },
+  "devDependencies": {
+    "@types/blessed": "^0.1.27",
+    "@types/node": "^25.5.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "blessed": "^0.1.81",
+    "ddgs": "^1.0.4",
+    "vectra": "^0.14.0"
+  }
+}

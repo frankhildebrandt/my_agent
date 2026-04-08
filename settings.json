@@ -1,0 +1,93 @@
+{
+  "commands": {
+    "prefix": "/"
+  },
+  "chat": {
+    "inputLabel": "Prompt",
+    "welcomeMessage": "Chat initialisiert. Commands starten mit '/'. Verfuegbar: /help, /new, /usage, /credits, /settings, /models, /use <alias>, /debug, /reset, /sleep, /sleepquiet, /memoryreset, /quit. Tool-Loop fuer agent_scripts ist aktiv."
+  },
+  "editor": {
+    "command": "default"
+  },
+  "files": {
+    "settingsPath": "/Users/frankhildebrandt/Library/Application Support/Stackriot/Worktrees/my_agent/base/settings.json"
+  },
+  "llm": {
+    "defaultModel": "openai-default",
+    "requestTimeoutMs": 90000,
+    "systemPrompt": "Du bist ein pragmatischer, deutschsprachiger Assistent und antwortest knapp, praezise und technisch sauber. Nutze verfuegbare Tools zielgerichtet, wenn sie zur Loesung beitragen.",
+    "providers": {
+      "openai": {
+        "type": "openai-compatible",
+        "baseUrl": "https://api.openai.com/v1",
+        "apiKeyEnv": "OPENAI_API_KEY"
+      },
+      "openrouter": {
+        "type": "openai-compatible",
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "apiKeyEnv": "OPENROUTER_API_KEY",
+        "defaultHeaders": {
+          "HTTP-Referer": "http://localhost/my_agent",
+          "X-Title": "my_agent"
+        }
+      }
+    },
+    "models": {
+      "openai-default": {
+        "provider": "openai",
+        "model": "gpt-5.4-mini",
+        "temperature": 0.2,
+        "maxTokens": 12000
+      },
+      "openrouter-default": {
+        "provider": "openrouter",
+        "model": "openai/gpt-4.1-mini",
+        "temperature": 0.2,
+        "maxTokens": 12000
+      }
+    }
+  },
+  "tools": {
+    "enabled": true,
+    "executionTimeoutMs": 6000000,
+    "maxRoundtrips": 50,
+    "scriptsDir": "/Users/frankhildebrandt/Library/Application Support/Stackriot/Worktrees/my_agent/base/agent_scripts"
+  },
+  "memory": {
+    "shortTerm": {
+      "mode": "hybrid",
+      "maxTotalChars": 4000,
+      "persistPath": "/Users/frankhildebrandt/Library/Application Support/Stackriot/Worktrees/my_agent/base/agent_memory/short_term_memory.json"
+    },
+    "midTerm": {
+      "dir": "/Users/frankhildebrandt/Library/Application Support/Stackriot/Worktrees/my_agent/base/agent_memory/mid_term_memory",
+      "indexPath": "/Users/frankhildebrandt/Library/Application Support/Stackriot/Worktrees/my_agent/base/agent_memory/mid_term_index",
+      "topK": 6,
+      "maxFragmentChars": 900,
+      "maxTotalChars": 3500,
+      "maxFragmentsPerSleep": 10,
+      "maxEntries": 24
+    },
+    "longTerm": {
+      "dir": "/Users/frankhildebrandt/Library/Application Support/Stackriot/Worktrees/my_agent/base/agent_memory/long_term_memory",
+      "indexPath": "/Users/frankhildebrandt/Library/Application Support/Stackriot/Worktrees/my_agent/base/agent_memory/long_term_index",
+      "topK": 5,
+      "maxFragmentChars": 1000,
+      "maxTotalChars": 4000,
+      "maxFragmentsPerSleep": 8
+    }
+  },
+  "scriptRegistry": {
+    "path": "/Users/frankhildebrandt/Library/Application Support/Stackriot/Worktrees/my_agent/base/agent_scripts/registry.json",
+    "indexPath": "/Users/frankhildebrandt/Library/Application Support/Stackriot/Worktrees/my_agent/base/agent_scripts/registry_index",
+    "topK": 5,
+    "embeddings": {
+      "provider": "openai",
+      "model": "text-embedding-3-small",
+      "requestTimeoutMs": 30000
+    }
+  },
+  "ui": {
+    "title": "my_agent"
+  }
+}

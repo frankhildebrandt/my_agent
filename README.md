@@ -13,6 +13,17 @@ Ein selbst erweiternder KI-Agent, geschrieben in TypeScript, um verschiedene Auf
 
 Die Anwendung startet jetzt als TUI mit Chat-Eingabe und Command-Unterstützung.
 
+### Architektur
+
+Die Laufzeit ist jetzt entlang klarer Schichten organisiert:
+
+- `src/domain` enthaelt zentrale Contracts und DTOs
+- `src/application` enthaelt Session-, Command- und Chat-Orchestrierung
+- `src/infrastructure` kapselt Settings, Inference, Memory, Script-Registry und Systemzugriffe
+- `src/presentation/tui` kapselt die `blessed`-Oberflaeche
+
+Der Einstiegspunkt in [src/index.ts](/Users/frankhildebrandt/Library/Application%20Support/Stackriot/Worktrees/my_agent/base/src/index.ts) ist nur noch Composition Root. Die eigentliche Chat- und Command-Logik liegt in OOP-basierten Services wie `ChatController`, `SessionContext`, `ContextBuilder`, `ToolRegistry` und den Infrastruktur-Repositories.
+
 ### Konfiguration
 
 `settings.json` ist die zentrale Quelle fuer Konfigurationen jeder Art.
@@ -56,6 +67,10 @@ Alternativ kann im Projektverzeichnis eine `.env` liegen. Sie wird beim Start au
 
 ### Commands
 
+- `/help` zeigt eine kompakte Uebersicht aller verfuegbaren Commands im Chat an
+- `/new` startet eine neue Session und setzt das `short_term_memory` zurueck
+- `/usage` zeigt die aufsummierte Session-Usage sowie eine geschaetzte Groesse des aktuell belegten Prompt-/Kontextfensters
+- `/credits` zeigt bei OpenRouter-Key-Nutzung die noch verfuegbaren Credits und ein grobes Token-Aequivalent fuer das aktive Modell
 - `/settings` oeffnet `settings.json` im Default-Editor des Systems
 - `/models` listet konfigurierte Modell-Aliase
 - `/use <alias>` wechselt das aktive Modell fuer die laufende Session
@@ -64,6 +79,7 @@ Alternativ kann im Projektverzeichnis eine `.env` liegen. Sie wird beim Start au
 - `/sleep` verdichtet `short_term_memory` per LLM in dedupliziertes `mid_term_memory` und in strengere, bewaehrte `long_term_memory`-Fragmente; dabei sollen insbesondere erzeugte oder benutzte Tools und Hilfsskripte mit Namen, Zweck, Parametern und Funktionsweise kompakt festgehalten werden; danach wird die Session geleert
 - `/sleepquiet` verhaelt sich wie `/sleep`, zeigt aber nur eine knappe Erfolgsmeldung
 - `/memoryreset` leert `short_term_memory`, `mid_term_memory` und `long_term_memory` komplett
+- `/quit` beendet die TUI sauber; entspricht funktional `Ctrl+C`
 
 ### Tool-Registry
 
@@ -86,9 +102,9 @@ Die Loop endet, sobald das Modell eine finale Antwort liefert oder `tools.maxRou
 
 ### Script Registry
 
-Die Script-Registry liegt standardmaessig in `./agent_scripts/registry.json`.
+Die Script-Registry liegt standardmaessig in `./agent_scripts/registry.json`. Der zugehoerige `vectra`-Index liegt standardmaessig in `./agent_scripts/registry_index`.
 
-Neue Skripte werden beim Tool `create_typescript_file` zusammen mit einem kurzen Hilfetext dort veroeffentlicht. `query_script_registry` kann diese Eintraege spaeter wiederfinden und nutzt dafuer bevorzugt Embeddings ueber Pfad plus Hilfetext; wenn kein Embedding verfuegbar ist, faellt die Suche auf einfache Textbewertung zurueck.
+Neue Skripte werden beim Tool `create_typescript_file` zusammen mit einem kurzen Hilfetext dort veroeffentlicht. `query_script_registry` kann diese Eintraege spaeter wiederfinden und nutzt dafuer bevorzugt den `vectra`-Index ueber Pfad plus Hilfetext; wenn kein Embedding oder kein Index-Treffer verfuegbar ist, faellt die Suche auf einfache Textbewertung zurueck.
 
 ### Agent Memory
 
@@ -103,6 +119,8 @@ Das zentrale Ziel ist kleine Prompts. Vor jeder Nutzeranfrage werden nur die rel
 Mit `/debug` kann die TUI diese Auswahl sichtbar machen. Der Modus zeigt nur Beobachtungsdaten an: verwendete Embedding-Requests, Retrieval-Pfad fuer Mid-/Long-Term-Memory und den nach Segmenten getrennten Prompt. Die eigentliche Ranking-, Tool- und Prompt-Logik wird dadurch nicht veraendert.
 
 Persistentes Wissen wird nicht mehr direkt per Tool geschrieben. Stattdessen landet neuer Kontext zuerst im `short_term_memory` und wird erst mit `/sleep` oder `/sleepquiet` in `mid_term_memory` und gegebenenfalls zusaetzlich in `long_term_memory` hochgestuft.
+
+Das persistierte `short_term_memory` speichert neben Nutzer- und Assistententext auch strukturierte Telemetrie zu Model-Requests und -Responses, Reasoning, Tool-Calls, Tool-Ergebnissen, Erfolgs-/Fehlerstatus und Token-Usage. Fuer das eigentliche Prompt-Kontextfenster wird daraus weiterhin nur ein kompaktes Snapshot gebaut, damit die gespeicherten Rohdaten das Kontextlimit nicht sprengen.
 
 Wichtige Settings:
 
@@ -123,6 +141,7 @@ Wichtige Settings:
 - `memory.longTerm.maxTotalChars` begrenzt die gesamte LTM-Menge im Prompt
 - `memory.longTerm.maxFragmentsPerSleep` begrenzt die Anzahl neuer Fragmente pro Sleep-Durchlauf
 - `scriptRegistry.path` definiert die persistente Registry-Datei fuer Hilfsskripte
+- `scriptRegistry.indexPath` definiert den persistierten `vectra`-Indexordner fuer die Script-Registry
 - `scriptRegistry.topK` begrenzt die Anzahl der Suchtreffer
 - `scriptRegistry.embeddings.*` konfiguriert Provider, Modell und Timeout fuer die Vektorsuche
 - `tools.enabled` schaltet die Tool-Loop an oder aus
