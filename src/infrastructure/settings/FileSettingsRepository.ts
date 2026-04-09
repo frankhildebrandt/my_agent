@@ -1,10 +1,13 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import { basename, extname, resolve } from "node:path";
 import { ISettingsRepository } from "../../domain/ports";
 import { AppSettings } from "../../settings";
 import { SettingsMigrationService } from "./SettingsMigrationService";
 
 type JsonObject = Record<string, unknown>;
+const MAX_UNIX_SOCKET_PATH_BYTES = 103;
 
 function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -29,6 +32,18 @@ function deepMerge<T>(base: T, override: unknown): T {
   }
 
   return merged as T;
+}
+
+function shortenUnixSocketPath(socketPath: string): string {
+  if (Buffer.byteLength(socketPath, "utf8") <= MAX_UNIX_SOCKET_PATH_BYTES) {
+    return socketPath;
+  }
+
+  const extension = extname(socketPath) || ".sock";
+  const fileName = basename(socketPath, extension);
+  const safeName = fileName.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 24) || "control";
+  const suffix = createHash("sha256").update(socketPath).digest("hex").slice(0, 12);
+  return resolve(tmpdir(), `${safeName}-${suffix}${extension}`);
 }
 
 export class FileSettingsRepository implements ISettingsRepository {
@@ -115,8 +130,8 @@ export class FileSettingsRepository implements ISettingsRepository {
         ...settings.controlSocket,
         path:
           controlSocketPath.length > 0
-            ? resolve(process.cwd(), controlSocketPath)
-            : resolve(process.cwd(), "agent_socket", "control.sock"),
+            ? shortenUnixSocketPath(resolve(process.cwd(), controlSocketPath))
+            : shortenUnixSocketPath(resolve(process.cwd(), "agent_socket", "control.sock")),
       },
       scriptRegistry: {
         ...settings.scriptRegistry,

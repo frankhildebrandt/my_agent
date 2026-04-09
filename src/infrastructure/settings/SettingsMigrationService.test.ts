@@ -1,5 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import { defaultSettings } from "../../settings";
+import { FileSettingsRepository } from "./FileSettingsRepository";
 import { SettingsMigrationService } from "./SettingsMigrationService";
 
 test("SettingsMigrationService migrates legacy flat memory settings", () => {
@@ -28,3 +33,32 @@ test("SettingsMigrationService migrates legacy flat memory settings", () => {
   assert.equal(migrated.memory.longTerm.indexPath, "./legacy_memory/long_term_index");
 });
 
+test("FileSettingsRepository shortens overly long unix socket paths", () => {
+  const rootDir = mkdtempSync(resolve(tmpdir(), "agent-settings-"));
+  const deepDir = resolve(rootDir, "this", "path", "is", "intentionally", "very", "long", "for", "unix", "socket", "tests");
+  const settingsPath = resolve(deepDir, "settings.json");
+  const longSocketPath = resolve(deepDir, "agent_socket", "control.sock");
+
+  try {
+    mkdirSync(deepDir, { recursive: true });
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        controlSocket: {
+          path: longSocketPath,
+        },
+      }),
+      "utf8",
+    );
+
+    const repository = new FileSettingsRepository(defaultSettings, new SettingsMigrationService(), settingsPath);
+    const settings = repository.load();
+    const persisted = JSON.parse(readFileSync(settingsPath, "utf8")) as { controlSocket: { path: string } };
+
+    assert.ok(Buffer.byteLength(settings.controlSocket.path, "utf8") <= 103);
+    assert.ok(settings.controlSocket.path.startsWith(`${tmpdir()}/`));
+    assert.equal(persisted.controlSocket.path, settings.controlSocket.path);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

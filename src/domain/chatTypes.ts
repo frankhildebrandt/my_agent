@@ -4,6 +4,7 @@ import type {
   ShortTermConversationEntry,
   ShortTermMemoryDebugInfo,
   TierMemoryDebugInfo,
+  ToolRoutingLearning,
 } from "../memory";
 
 export interface SleepConsolidationResponse {
@@ -12,6 +13,7 @@ export interface SleepConsolidationResponse {
   longTermFragments: LongTermFragmentDraft[];
   problemMidTermFragments?: LongTermFragmentDraft[];
   problemLongTermFragments?: LongTermFragmentDraft[];
+  toolRoutingLearnings?: ToolRoutingLearning[];
 }
 
 export interface MemoryRoundupResponse {
@@ -19,6 +21,7 @@ export interface MemoryRoundupResponse {
   longTermFragments: LongTermFragmentDraft[];
   problemMidTermFragments?: LongTermFragmentDraft[];
   problemLongTermFragments?: LongTermFragmentDraft[];
+  toolRoutingLearnings?: ToolRoutingLearning[];
 }
 
 export interface ScriptKnowledgeResponse {
@@ -47,6 +50,7 @@ export interface RequestDebugInfo {
   shortTerm: ShortTermMemoryDebugInfo;
   midTerm: TierMemoryDebugInfo;
   longTerm: TierMemoryDebugInfo;
+  toolRoutingLearnings: ToolRoutingLearning[];
 }
 
 export interface SessionUsageTotals {

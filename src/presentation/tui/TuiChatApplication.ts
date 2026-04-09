@@ -174,7 +174,7 @@ export class TuiChatApplication implements IChatView {
       this.settings,
       this,
       this.sessionContext,
-      new ContextBuilder(this.settings, this.memoryRepository),
+      new ContextBuilder(this.settings, this.memoryRepository, this.agentModuleService),
       this.inferenceClient,
       this.toolExecutor,
       this.editorLauncher,

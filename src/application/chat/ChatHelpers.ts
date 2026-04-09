@@ -16,7 +16,9 @@ import type {
   SleepFeedbackEntry,
   ShortTermMemoryDebugInfo,
   TierMemoryDebugInfo,
+  ToolRoutingLearning,
 } from "../../memory";
+import { parseToolRoutingLearningFragment } from "../../infrastructure/memory/memoryShared";
 
 interface ModelPricing {
   inputUsdPer1M: number;
@@ -170,11 +172,21 @@ function parseConsolidationResponse(
       })
       .slice(0, maxFragments);
 
-  return {
+  const parsedFragments = {
     midTermFragments: toFragmentList(midTermFragments.length > 0 ? midTermFragments : fragments),
     longTermFragments: toFragmentList(longTermFragments),
     problemMidTermFragments: toFragmentList(problemMidTermFragments),
     problemLongTermFragments: toFragmentList(problemLongTermFragments),
+  };
+
+  return {
+    ...parsedFragments,
+    toolRoutingLearnings: extractToolRoutingLearningsFromFragments([
+      ...parsedFragments.midTermFragments,
+      ...parsedFragments.longTermFragments,
+      ...parsedFragments.problemMidTermFragments,
+      ...parsedFragments.problemLongTermFragments,
+    ]),
   };
 }
 
@@ -202,6 +214,33 @@ export function mergeConsolidationFragments(response: {
     midTermFragments: [...response.midTermFragments, ...(response.problemMidTermFragments ?? [])],
     longTermFragments: [...response.longTermFragments, ...(response.problemLongTermFragments ?? [])],
   };
+}
+
+function extractToolRoutingLearningsFromFragments(
+  fragments: LongTermFragmentDraft[],
+): ToolRoutingLearning[] {
+  const learnings = new Map<string, ToolRoutingLearning>();
+
+  for (const fragment of fragments) {
+    const parsed = parseToolRoutingLearningFragment(fragment.title, fragment.content);
+    if (!parsed) {
+      continue;
+    }
+
+    const key = [
+      parsed.requestPattern,
+      parsed.preferredTools.join(","),
+      parsed.preferredScripts.join(","),
+      parsed.preferredModules.join(","),
+      parsed.avoidDiscoveryTools.join(","),
+      parsed.fallback,
+    ].join("::");
+    if (!learnings.has(key)) {
+      learnings.set(key, parsed);
+    }
+  }
+
+  return [...learnings.values()];
 }
 
 export function parseScriptKnowledgeResponse(
@@ -330,10 +369,14 @@ export function buildSleepMessages(
         "- problemMidTermFragments und problemLongTermFragments halten negative Erfahrungen fest, aber nur dann, wenn daraus konkrete Gegenmassnahmen, Warnsignale oder robustere Vorgehensweisen abgeleitet werden koennen.",
         "- Wenn in der Session Tools oder Hilfsskripte erzeugt, angepasst oder erfolgreich benutzt wurden, sollen diese bevorzugt als eigene Memory-Fragmente festgehalten werden.",
         "- Solche Fragmente muessen die konkreten Namen der Tools oder Skripte nennen und knapp erklaeren, wie sie funktionieren, welche Eingaben oder Parameter sie erwarten und wofuer sie geeignet sind.",
+        "- Fuer wiederkehrende Anfragebilder darfst du ein eigenes Routing-Fragment erzeugen: Titel 'tool routing memory: <anfragebild>'.",
+        "- Routing-Fragmente muessen genau diese Felder enthalten: REQUEST_PATTERN:, PREFER_TOOLS:, PREFER_SCRIPTS:, PREFER_MODULES:, AVOID_DISCOVERY:, DISCOVERY_FALLBACK:, RATIONALE:.",
+        "- DISCOVERY_FALLBACK soll standardmaessig after_first_failure_or_empty_result sein, damit Discovery erst nach einem Fehlschlag oder einem leeren Ergebnis wieder erlaubt wird.",
+        "- Ein Routing-Long-Term-Fragment ist nur dann erlaubt, wenn es konkret Tool-IDs nennt und gegenueber generischer Discovery klar Tokens oder Aufwand spart.",
         "- Bewaehrte, mehrfach nuetzliche Tools und Skripte gehoeren bevorzugt in longTermFragments; einmalig relevante Tool-Kontexte eher in midTermFragments.",
         "- Wenn Fehlversuche, gescheiterte Anfragen, Script-Probleme oder Zielverfehlungen erkennbar sind, fasse sie als problemorientierte Learnings zusammen: Problem, Ausloeser, Gegenmassnahme.",
         "- Ein longTermFragment ist nur dann sinnvoll, wenn es gegenueber Weglassen klaren Mehrwert bringt und dabei moeglichst wenig Tokens kostet.",
-        "- Verwirf longTerm-Kandidaten, die nur eine allgemeine Beobachtung wiederholen, keinen konkreten Skript-/Tool-Namen nennen oder keine stabile wiederverwendbare Regel enthalten.",
+        "- Verwirf longTerm-Kandidaten, die nur eine allgemeine Beobachtung wiederholen, keinen konkreten Skript-/Tool-Namen nennen, keine stabile wiederverwendbare Regel enthalten oder keinen produktiven Kostenvorteil bringen.",
         "- Wenn ein Tool- oder Skript-Learning ohne den konkreten Namen wie z. B. einer Datei oder eines Tool-Identifiers nicht nuetzlich waere, dann speichere es gar nicht.",
         "- Erzeuge mehrere kleine, thematisch saubere Fragmente statt Sammelnotizen.",
         "- Verwirf fluechtige Aufgaben, Rohlogs, Tool-Rauschen und Wiederholungen.",
@@ -372,6 +415,8 @@ export function buildMemoryRoundupMessages(
         "- Fuehre aehnliche oder redundante Fragmente zusammen und wirf veraltete oder schwache Fragmente weg.",
         "- Halte Mid-Term-Memory kompakt und arbeitsnah.",
         "- Long-Term-Memory soll nur stabile, wiederverwendbare Regeln, bewaehrte Workflows oder robuste Tool-/Skript-Learnings enthalten.",
+        "- Wiederkehrende Tool-Routing-Learnings sollen als Fragmente mit Titel 'tool routing memory: <anfragebild>' und den Feldern REQUEST_PATTERN, PREFER_TOOLS, PREFER_SCRIPTS, PREFER_MODULES, AVOID_DISCOVERY, DISCOVERY_FALLBACK, RATIONALE notiert werden.",
+        "- Solche Routing-Long-Term-Fragmente nur behalten, wenn sie konkrete Tool-IDs nennen und Discovery-Aufwand oder Tokenkosten erkennbar reduzieren.",
         "- Negative Erfahrungen sollen nicht nur erwaehnt, sondern als problemorientierte Learnings mit klaren Gegenmassnahmen formuliert werden.",
         "- Wenn mehrere Fehlversuche auf dasselbe Muster hindeuten, fasse sie in ein staerkeres Problemfragment zusammen.",
         "- Problemfragmente gehoeren nur dann nach longTermFragments, wenn die Gegenmassnahme stabil und wiederverwendbar ist.",
@@ -423,6 +468,29 @@ function readErrorMessage(value: unknown): string {
   );
 }
 
+function isEmptyToolResultMetadata(metadata: Record<string, unknown>): boolean {
+  const explicit = metadata.resultEmpty;
+  if (typeof explicit === "boolean") {
+    return explicit;
+  }
+
+  const result = metadata.result;
+  if (typeof result !== "object" || result === null) {
+    return false;
+  }
+
+  const output = (result as { output?: unknown }).output;
+  if (typeof output !== "object" || output === null || Array.isArray(output)) {
+    return false;
+  }
+
+  const candidate = output as Record<string, unknown>;
+  return ["matches", "modules", "results", "entries", "items"].some((key) => {
+    const value = candidate[key];
+    return Array.isArray(value) && value.length === 0;
+  });
+}
+
 export function extractFailureFeedbackFromShortTermEntries(
   entries: ShortTermConversationEntry[],
 ): MemoryFeedbackEntry[] {
@@ -445,6 +513,16 @@ export function extractFailureFeedbackFromShortTermEntries(
         if (!seen.has(key)) {
           seen.add(key);
           collected.push(buildFeedbackMessage(createdAt, "tool", "failure", message));
+        }
+      } else if (isEmptyToolResultMetadata(metadata as Record<string, unknown>)) {
+        const toolName = typeof (metadata as { tool?: unknown }).tool === "string"
+          ? String((metadata as { tool?: unknown }).tool)
+          : "unbekanntes Tool";
+        const message = `Tool ${toolName} lieferte keinen nutzbaren Treffer. Danach ist Discovery oder ein anderer direkter Kandidat zulaessig.`;
+        const key = `tool-empty:${message}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          collected.push(buildFeedbackMessage(createdAt, "tool", "goal_missed", message));
         }
       }
       continue;
@@ -561,6 +639,25 @@ function formatChatDebug(snapshot: DebugSnapshot): string {
   ].join("\n");
 }
 
+function formatToolRoutingDebug(learnings: ToolRoutingLearning[]): string {
+  if (learnings.length === 0) {
+    return "Tool-Routing:\n- keine Routing-Hinweise";
+  }
+
+  return [
+    "Tool-Routing:",
+    ...learnings.map((learning) => {
+      const preferred = [
+        ...learning.preferredTools,
+        ...learning.preferredScripts,
+        ...learning.preferredModules,
+      ].join(" -> ");
+      const avoided = learning.avoidDiscoveryTools.join(", ") || "keine";
+      return `- ${learning.requestPattern} | zuerst=${preferred} | discovery_meiden=${avoided} | fallback=${learning.fallback}`;
+    }),
+  ].join("\n");
+}
+
 export function renderDebugReport(requestDebug: RequestDebugInfo, snapshot: DebugSnapshot): string {
   return [
     "DEBUG",
@@ -568,6 +665,7 @@ export function renderDebugReport(requestDebug: RequestDebugInfo, snapshot: Debu
     formatEmbeddingDebug(snapshot),
     formatChatDebug(snapshot),
     formatMemoryDebugInfo(requestDebug.shortTerm, requestDebug.midTerm, requestDebug.longTerm),
+    formatToolRoutingDebug(requestDebug.toolRoutingLearnings),
     formatPromptSegments(requestDebug.promptSegments),
   ].join("\n\n");
 }

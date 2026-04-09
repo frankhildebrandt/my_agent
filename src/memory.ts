@@ -12,6 +12,7 @@ import type {
   StoredLongTermFragment,
   TierMemoryContextResult,
   TierMemoryDebugInfo,
+  ToolRoutingLearning,
 } from "./domain/memoryTypes";
 import { ShortTermMemoryService } from "./infrastructure/memory/ShortTermMemoryService";
 import { TieredMemoryService } from "./infrastructure/memory/TieredMemoryService";
@@ -32,6 +33,7 @@ export type {
   StoredLongTermFragment,
   TierMemoryContextResult,
   TierMemoryDebugInfo,
+  ToolRoutingLearning,
 } from "./domain/memoryTypes";
 
 const shortTermMemoryService = new ShortTermMemoryService();

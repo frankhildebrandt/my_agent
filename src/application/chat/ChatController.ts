@@ -63,6 +63,7 @@ import {
   analyzeAssistantToolResponse,
   parseAssistantToolResponse,
 } from "../../tools/index";
+import type { ToolResult } from "../../tools";
 import { CommandDispatcher } from "../commands/CommandDispatcher";
 
 interface ActiveExecutionState {
@@ -80,8 +81,31 @@ interface ChatPromptOptions {
   externalCallbacks?: ExternalAgentRequestCallbacks;
 }
 
+interface DeferredToolContinuation {
+  message: string;
+}
+
 interface ExternalQueueMetadata {
   callbacks: ExternalAgentRequestCallbacks;
+}
+
+function isLikelyEmptyToolResult(result: ToolResult): boolean {
+  if (!result.ok) {
+    return false;
+  }
+
+  const collectionKeys = ["matches", "modules", "results", "entries", "items"];
+  return collectionKeys.some((key) => {
+    const value = result.output[key];
+    return Array.isArray(value) && value.length === 0;
+  });
+}
+
+function getSuggestedNextStepForToolResult(
+  toolSucceeded: boolean,
+  resultEmpty: boolean,
+): "retry_direct" | "allow_discovery" {
+  return !toolSucceeded || resultEmpty ? "allow_discovery" : "retry_direct";
 }
 
 export class ChatController implements IAgentRequestService {
@@ -334,6 +358,22 @@ export class ChatController implements IAgentRequestService {
     controller: AbortController | null | undefined,
   ): boolean {
     return controller?.signal.aborted ?? false;
+  }
+
+  private getDeferredToolContinuation(
+    result: ToolResult,
+  ): DeferredToolContinuation | null {
+    if (!result.ok || result.output.deferred !== true) {
+      return null;
+    }
+
+    return {
+      message:
+        typeof result.output.deferredMessage === "string" &&
+        result.output.deferredMessage.trim().length > 0
+          ? result.output.deferredMessage.trim()
+          : `Asynchrone Ausfuehrung gestartet ueber ${result.tool}.`,
+    };
   }
 
   private ensureExecutionNotAborted(
@@ -595,16 +635,17 @@ export class ChatController implements IAgentRequestService {
         this.view.renderDebugReport(
           renderDebugReport(
             {
-              modelAlias: this.sessionContext.activeModelAlias,
-              providerName:
-                this.settings.llm.models[this.sessionContext.activeModelAlias]
-                  ?.provider ?? "unbekannt",
-              providerModelId:
-                this.settings.llm.models[this.sessionContext.activeModelAlias]
-                  ?.model ?? "unbekannt",
-              promptSegments: [
-                {
-                  label: "Sleep-Systemprompt",
+            modelAlias: this.sessionContext.activeModelAlias,
+            providerName:
+              this.settings.llm.models[this.sessionContext.activeModelAlias]
+                ?.provider ?? "unbekannt",
+            providerModelId:
+              this.settings.llm.models[this.sessionContext.activeModelAlias]
+                ?.model ?? "unbekannt",
+            toolRoutingLearnings: [],
+            promptSegments: [
+              {
+                label: "Sleep-Systemprompt",
                   role: "system",
                   content: sleepMessages[0]?.content ?? "",
                 },
@@ -619,6 +660,7 @@ export class ChatController implements IAgentRequestService {
                 tier: "midTerm",
                 query: quiet ? "sleepquiet" : "sleep",
                 retrievalMode: "empty",
+                routingLearnings: [],
                 embeddingAttempted: debugCollector
                   .snapshot()
                   .embeddings.some(
@@ -641,6 +683,7 @@ export class ChatController implements IAgentRequestService {
                 tier: "longTerm",
                 query: quiet ? "sleepquiet" : "sleep",
                 retrievalMode: "empty",
+                routingLearnings: [],
                 embeddingAttempted: debugCollector
                   .snapshot()
                   .embeddings.some(
@@ -950,6 +993,7 @@ export class ChatController implements IAgentRequestService {
         );
       this.ensureExecutionNotAborted(execution.controller);
       let finalText: string | null = null;
+      let deferredContinuation: DeferredToolContinuation | null = null;
       let roundtripCount = 0;
       let sawToolCall = false;
       let toolExecutionCount = 0;
@@ -1206,6 +1250,14 @@ export class ChatController implements IAgentRequestService {
             this.settings,
             this.agentModuleService,
           );
+          if (completionReview.deferrals.length > 0) {
+            deferredContinuation = {
+              message: completionReview.deferrals
+                .map((entry) => `${entry.moduleName}: ${entry.message}`)
+                .join(" | "),
+            };
+            break;
+          }
           if (completionReview.blockers.length > 0) {
             if (streamedResponseIndex !== null) {
               this.view.updateMessage(streamedResponseIndex, {
@@ -1301,6 +1353,9 @@ export class ChatController implements IAgentRequestService {
         let toolSummary: string;
         let streamedToolIndex: number | null = null;
         let toolSucceeded = false;
+        let toolResultEmpty = false;
+        let toolResultPayload: Record<string, unknown> | undefined;
+        let suggestedNextStep: "retry_direct" | "allow_discovery" = "retry_direct";
 
         try {
           const toolResult = await this.toolExecutor.execute(
@@ -1372,12 +1427,18 @@ export class ChatController implements IAgentRequestService {
             }
           }
 
+          toolResultEmpty = isLikelyEmptyToolResult(toolResult);
+          suggestedNextStep = getSuggestedNextStepForToolResult(
+            toolResult.ok,
+            toolResultEmpty,
+          );
           toolResultText = JSON.stringify(toolResult, null, 2);
           toolSummary = toolResult.summary;
           toolSucceeded = toolResult.ok;
+          toolResultPayload = JSON.parse(toolResultText) as Record<string, unknown>;
           this.view.appendMessage(
             "tool>",
-            `Tool ${toolExecutionCount}: ${toolSummary}`,
+            `Tool ${toolExecutionCount}: ${toolSummary}${toolResultEmpty ? " (leer/unergiebig)" : ""}`,
           );
         } catch (error) {
           const message =
@@ -1397,6 +1458,9 @@ export class ChatController implements IAgentRequestService {
             null,
             2,
           );
+          toolResultPayload = JSON.parse(toolResultText) as Record<string, unknown>;
+          toolResultEmpty = false;
+          suggestedNextStep = "allow_discovery";
           this.memoryRepository.recordMemoryFeedback(this.settings, {
             createdAt: new Date().toISOString(),
             scope: "tool",
@@ -1418,23 +1482,65 @@ export class ChatController implements IAgentRequestService {
           metadata: {
             roundtrip: roundtripCount,
             tool: parsedResponse.call.tool,
+            arguments: parsedResponse.call.arguments ?? null,
             success: toolSucceeded,
-            ...(debugCollector
-              ? {
-                  result: JSON.parse(toolResultText) as Record<string, unknown>,
-                }
-              : {}),
+            resultEmpty: toolResultEmpty,
+            suggestedNextStep,
+            ...(toolResultPayload ? { result: toolResultPayload } : {}),
           },
         });
+
+        if (toolResultPayload) {
+          const deferredToolContinuation =
+            this.getDeferredToolContinuation(toolResultPayload as unknown as ToolResult);
+          if (deferredToolContinuation) {
+            deferredContinuation = deferredToolContinuation;
+            break;
+          }
+        }
 
         conversation.push({
           role: "user",
           content: [
             `Tool-Ergebnis fuer ${parsedResponse.call.tool}:`,
             toolResultText,
-            "Analysiere dieses Ergebnis und antworte entweder mit dem naechsten Tool-Call oder mit final.",
+            !toolSucceeded
+              ? "Dieses Ergebnis war ein Fehlschlag. Ein anderer direkter Kandidat oder jetzt Discovery ist zulaessig."
+              : toolResultEmpty
+                ? "Dieses Ergebnis war leer oder unergiebig. Jetzt ist Discovery oder ein anderer direkter Kandidat zulaessig."
+                : "Dieses Ergebnis ist nutzbar. Bevorzuge weiterhin direkte, guenstige Tool-Pfade und antworte mit dem naechsten Tool-Call oder mit final.",
           ].join("\n"),
         });
+      }
+
+      if (deferredContinuation !== null) {
+        this.sessionContext.pushEvent({
+          role: "system",
+          kind: "status",
+          includeInPrompt: true,
+          content: `Anfrage pausiert fuer asynchrone Fortsetzung: ${deferredContinuation.message}`,
+          metadata: {
+            modelAlias: this.sessionContext.activeModelAlias,
+            deferred: true,
+          },
+        });
+        this.view.clearTransientStatus();
+        flushCorrectionSummary();
+        this.view.appendMessage("sys>", deferredContinuation.message);
+        if (options.origin === "external" && options.requestId) {
+          this.emitExternalEvent(
+            options.externalCallbacks,
+            {
+              requestId: options.requestId,
+              type: "deferred",
+              origin: "external",
+              label: options.label,
+              message: deferredContinuation.message,
+            },
+            true,
+          );
+        }
+        return;
       }
 
       if (finalText === null) {

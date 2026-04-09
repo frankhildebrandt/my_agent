@@ -66,7 +66,7 @@
       "maxFragmentChars": 900,
       "maxTotalChars": 3500,
       "maxFragmentsPerSleep": 10,
-      "maxEntries": 24
+      "maxEntries": 50
     },
     "longTerm": {
       "dir": "/Users/frankhildebrandt/Library/Application Support/Stackriot/Worktrees/my_agent/base/agent_memory/long_term_memory",
@@ -89,7 +89,7 @@
     "maxResponseBytes": 131072
   },
   "controlSocket": {
-    "path": "/Users/frankhildebrandt/Library/Application Support/Stackriot/Worktrees/my_agent/base/agent_socket/control.sock",
+    "path": "/var/folders/qn/x0nhl_c5101bpmx3s7qmt36r0000gn/T/control-9be769a60022.sock",
     "maxQueuedRequests": 8,
     "requestTimeoutMs": 90000
   },
