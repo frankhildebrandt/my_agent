@@ -1,3 +1,5 @@
+import { BuiltinMemoryBootstrapService } from "./infrastructure/memory/BuiltinMemoryBootstrapService";
+import { agentModuleService } from "./modules";
 import { loadSettings } from "./settings";
 import { SystemClock } from "./infrastructure/system/SystemClock";
 import { EditorLauncher } from "./infrastructure/system/EditorLauncher";
@@ -7,9 +9,15 @@ import { ScriptRegistryRepository } from "./infrastructure/scriptRegistry/Script
 import { RegisteredToolExecutor, ToolRegistry } from "./tools/registry";
 import { TuiChatApplication } from "./presentation/tui/TuiChatApplication";
 
-function main(): void {
+async function main(): Promise<void> {
   const settings = loadSettings();
   const toolRegistry = new ToolRegistry();
+  const memoryBootstrap = new BuiltinMemoryBootstrapService();
+
+  await memoryBootstrap.ensureBuiltinsInLongTermMemory(
+    settings,
+    toolRegistry.getRegisteredTools(),
+  );
 
   const application = new TuiChatApplication(
     settings,
@@ -19,9 +27,10 @@ function main(): void {
     new MemoryRepository(),
     new ScriptRegistryRepository(),
     new RegisteredToolExecutor(toolRegistry),
+    agentModuleService,
   );
 
   application.start();
 }
 
-main();
+void main();

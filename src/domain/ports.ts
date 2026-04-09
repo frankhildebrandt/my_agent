@@ -1,6 +1,15 @@
 import type blessed from "blessed";
 import type { DebugCollector, DebugSnapshot } from "../debug";
 import type {
+  AgentExternalEvent,
+  AgentExternalRequestState,
+  AgentModulePanelState,
+  AgentRequestSummary,
+  AgentRequestOrigin,
+  ExternalAgentRequestCallbacks,
+  ExternalAgentRequestInput,
+} from "./agentControlTypes";
+import type {
   BuildConversationResult,
   CreatedScriptInfo,
   PromptDebugSegment,
@@ -25,6 +34,8 @@ import type {
 import type {
   AgentModuleCallResponse,
   AgentModuleDiscoveryEntry,
+  AgentModulePolicySnapshot,
+  AgentModuleRuntimeInfo,
   BootstrapAgentModuleOptions,
   DiscoverAgentModulesOptions,
 } from "../modules";
@@ -34,7 +45,7 @@ import type {
   ToolExecutionCallbacks,
   ToolExecutionContext,
   ToolResult,
-} from "../tools";
+} from "../tools/index";
 
 export type HistoryTone = "default" | "reasoning";
 export type StatusVariant = "idle" | "request" | "tool" | "error";
@@ -156,6 +167,11 @@ export interface IAgentModuleService {
     response: AgentModuleCallResponse;
   }>;
   discover(settings: AppSettings, options?: DiscoverAgentModulesOptions): AgentModuleDiscoveryEntry[];
+  getPolicySnapshot(settings: AppSettings): AgentModulePolicySnapshot;
+  getRuntimeInfos(settings: AppSettings): AgentModuleRuntimeInfo[];
+  isEnabled(settings: AppSettings, moduleName: string): boolean;
+  listRunningModules(settings: AppSettings): AgentModuleDiscoveryEntry[];
+  setEnabled(settings: AppSettings, moduleName: string, enabled: boolean): Promise<AgentModuleDiscoveryEntry>;
   start(settings: AppSettings, moduleName: string): Promise<AgentModuleDiscoveryEntry>;
   stop(settings: AppSettings, moduleName: string): Promise<AgentModuleDiscoveryEntry>;
 }
@@ -183,7 +199,22 @@ export interface IChatView {
   appendToMessage(index: number, chunk: string): void;
   setTransientStatus(message: string, variant: StatusVariant): void;
   clearTransientStatus(): void;
+  notifyExternalEvent(event: AgentExternalEvent): void;
+  setExternalRequestState(state: AgentExternalRequestState): void;
+  removeModulePanel(panelId: string): void;
+  upsertModulePanel(panel: AgentModulePanelState): void;
   renderDebugReport(report: string): void;
+}
+
+export interface IAgentRequestService {
+  abortActiveExecution(): void;
+  abortRequest(requestId: string): boolean;
+  getExternalRequestState(): AgentExternalRequestState;
+  submitExternalRequest(
+    input: ExternalAgentRequestInput,
+    callbacks: ExternalAgentRequestCallbacks,
+  ): AgentRequestSummary;
+  submitTuiPrompt(prompt: string): Promise<void>;
 }
 
 export interface IToolLoopDependencies {

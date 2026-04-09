@@ -3,7 +3,7 @@ import type { BuildConversationResult, PromptDebugSegment, RequestDebugInfo } fr
 import type { IMemoryRepository } from "../../domain/ports";
 import type { ChatMessage } from "../../inference";
 import type { AppSettings } from "../../settings";
-import { buildToolSystemPrompt } from "../../tools";
+import { buildToolSystemPrompt } from "../../tools/index";
 import type { ShortTermConversationEntry } from "../../memory";
 
 export class ContextBuilder {

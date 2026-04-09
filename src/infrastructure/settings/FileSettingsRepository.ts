@@ -60,6 +60,8 @@ export class FileSettingsRepository implements ISettingsRepository {
     const longTermDir = settings.memory.longTerm.dir.trim();
     const longTermIndexPath = settings.memory.longTerm.indexPath.trim();
     const modulesDir = settings.modules.dir.trim();
+    const modulePolicyPath = settings.modules.policyPath.trim();
+    const controlSocketPath = settings.controlSocket.path.trim();
     const scriptRegistryPath = settings.scriptRegistry.path.trim();
     const scriptRegistryIndexPath = settings.scriptRegistry.indexPath.trim();
     const scriptsDir = settings.tools.scriptsDir.trim();
@@ -104,6 +106,17 @@ export class FileSettingsRepository implements ISettingsRepository {
       modules: {
         ...settings.modules,
         dir: modulesDir.length > 0 ? resolve(process.cwd(), modulesDir) : resolve(process.cwd(), "agent_modules"),
+        policyPath:
+          modulePolicyPath.length > 0
+            ? resolve(process.cwd(), modulePolicyPath)
+            : resolve(process.cwd(), "agent_modules", "policy.json"),
+      },
+      controlSocket: {
+        ...settings.controlSocket,
+        path:
+          controlSocketPath.length > 0
+            ? resolve(process.cwd(), controlSocketPath)
+            : resolve(process.cwd(), "agent_socket", "control.sock"),
       },
       scriptRegistry: {
         ...settings.scriptRegistry,

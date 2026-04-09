@@ -79,6 +79,7 @@
   },
   "modules": {
     "dir": "/Users/frankhildebrandt/Library/Application Support/Stackriot/Worktrees/my_agent/base/agent_modules",
+    "policyPath": "/Users/frankhildebrandt/Library/Application Support/Stackriot/Worktrees/my_agent/base/agent_modules/policy.json",
     "socketTimeoutMs": 8000,
     "startupTimeoutMs": 20000,
     "discoveryTopK": 5,
@@ -86,6 +87,11 @@
     "autoStartOnCall": true,
     "includeModuleDetailsInPrompt": false,
     "maxResponseBytes": 131072
+  },
+  "controlSocket": {
+    "path": "/Users/frankhildebrandt/Library/Application Support/Stackriot/Worktrees/my_agent/base/agent_socket/control.sock",
+    "maxQueuedRequests": 8,
+    "requestTimeoutMs": 90000
   },
   "scriptRegistry": {
     "path": "/Users/frankhildebrandt/Library/Application Support/Stackriot/Worktrees/my_agent/base/agent_scripts/registry.json",

@@ -152,6 +152,14 @@ export async function replaceLongTermMemoryFragments(
   return tieredMemoryService.replaceTierFragments(settings, "longTerm", fragments, debugCollector);
 }
 
+export async function replaceProtectedLongTermMemoryFragments(
+  settings: AppSettings,
+  fragments: LongTermFragmentDraft[],
+  debugCollector?: DebugCollector,
+): Promise<StoredLongTermFragment[]> {
+  return tieredMemoryService.replaceProtectedTierFragments(settings, "longTerm", fragments, debugCollector);
+}
+
 export function clearMidTermMemory(settings: AppSettings): void {
   tieredMemoryService.clearTierMemory(settings, "midTerm");
 }

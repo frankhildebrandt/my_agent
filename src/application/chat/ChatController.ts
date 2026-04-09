@@ -1,7 +1,9 @@
 import { basename } from "node:path";
+import { randomUUID } from "node:crypto";
 import { DebugCollector } from "../../debug";
 import { SessionContext } from "../session/SessionContext";
 import { ContextBuilder } from "./ContextBuilder";
+import { ExternalRequestQueue } from "./ExternalRequestQueue";
 import {
   buildMemoryRoundupMessages,
   buildScriptKnowledgeMessages,
@@ -22,23 +24,72 @@ import {
   parseSleepConsolidationResponse,
   renderDebugReport,
 } from "./ChatHelpers";
-import type { IChatView, IEditorLauncher, IInferenceClient, IMemoryRepository, IScriptRegistryRepository, IToolExecutor } from "../../domain/ports";
+import {
+  formatModuleCompletionBlockersForPrompt,
+  runModuleCompletionCheck,
+} from "./ModuleCompletionCheck";
+import type {
+  AgentExternalEvent,
+  AgentRequestSummary,
+  ExternalAgentRequestCallbacks,
+  ExternalAgentRequestInput,
+} from "../../domain/agentControlTypes";
+import type {
+  IChatView,
+  IAgentRequestService,
+  IAgentModuleService,
+  IEditorLauncher,
+  IInferenceClient,
+  IMemoryRepository,
+  IScriptRegistryRepository,
+  IToolExecutor,
+} from "../../domain/ports";
 import type { AppSettings } from "../../settings";
-import type { ChatCompletionStreamCallbacks, ChatMessage } from "../../inference";
+import type {
+  ChatCompletionStreamCallbacks,
+  ChatMessage,
+} from "../../inference";
 import { InferenceError } from "../../inference";
-import type { RequestDebugInfo, ScriptKnowledgeResponse } from "../../domain/chatTypes";
-import type { MemoryFeedbackEntry, PersistedMemoryFragment, ShortTermConversationEntry } from "../../memory";
-import { parseAssistantToolResponse } from "../../tools";
+import type {
+  RequestDebugInfo,
+  ScriptKnowledgeResponse,
+} from "../../domain/chatTypes";
+import type {
+  MemoryFeedbackEntry,
+  PersistedMemoryFragment,
+  ShortTermConversationEntry,
+} from "../../memory";
+import {
+  analyzeAssistantToolResponse,
+  parseAssistantToolResponse,
+} from "../../tools/index";
 import { CommandDispatcher } from "../commands/CommandDispatcher";
 
 interface ActiveExecutionState {
   controller: AbortController;
   label: string;
+  origin: "tui" | "external";
+  requestId?: string;
+  externalCallbacks?: ExternalAgentRequestCallbacks;
 }
 
-export class ChatController {
+interface ChatPromptOptions {
+  origin: "tui" | "external";
+  requestId?: string;
+  label: string;
+  externalCallbacks?: ExternalAgentRequestCallbacks;
+}
+
+interface ExternalQueueMetadata {
+  callbacks: ExternalAgentRequestCallbacks;
+}
+
+export class ChatController implements IAgentRequestService {
   private activeExecution: ActiveExecutionState | null = null;
   private readonly commandDispatcher: CommandDispatcher;
+  private readonly externalQueue =
+    new ExternalRequestQueue<ExternalQueueMetadata>();
+  private externalDrainScheduled = false;
 
   constructor(
     private readonly settings: AppSettings,
@@ -50,51 +101,76 @@ export class ChatController {
     private readonly editorLauncher: IEditorLauncher,
     private readonly memoryRepository: IMemoryRepository,
     private readonly scriptRegistryRepository: IScriptRegistryRepository,
+    private readonly agentModuleService: IAgentModuleService,
     private readonly onQuit: () => void,
   ) {
-    this.commandDispatcher = new CommandDispatcher(this.settings.commands.prefix, {
-      onHelp: () => {
-        this.view.appendMessage("sys>", formatHelpMessage(this.settings.commands.prefix));
-      },
-      onNew: () => {
-        this.sessionContext.reset();
-        this.view.appendMessage("sys>", "Neue Session gestartet. Short-Term-Memory wurde zurueckgesetzt.");
-      },
-      onUsage: () => this.handleUsageCommand(),
-      onCredits: () => this.handleCreditsCommand(),
-      onSettings: () => this.handleSettingsCommand(),
-      onModels: () => {
-        this.view.appendMessage("sys>", `Modelle: ${this.formatModels()}`);
-      },
-      onUse: (alias) => {
-        if (!this.settings.llm.models[alias]) {
-          this.view.appendMessage("sys>", `Unbekanntes Modell-Alias: ${alias}`);
-          return;
-        }
+    this.commandDispatcher = new CommandDispatcher(
+      this.settings.commands.prefix,
+      {
+        onHelp: () => {
+          this.view.appendMessage(
+            "sys>",
+            formatHelpMessage(this.settings.commands.prefix),
+          );
+        },
+        onNew: () => {
+          this.sessionContext.reset();
+          this.view.appendMessage(
+            "sys>",
+            "Neue Session gestartet. Short-Term-Memory wurde zurueckgesetzt.",
+          );
+        },
+        onUsage: () => this.handleUsageCommand(),
+        onCredits: () => this.handleCreditsCommand(),
+        onSettings: () => this.handleSettingsCommand(),
+        onModels: () => {
+          this.view.appendMessage("sys>", `Modelle: ${this.formatModels()}`);
+        },
+        onUse: (alias) => {
+          if (!this.settings.llm.models[alias]) {
+            this.view.appendMessage(
+              "sys>",
+              `Unbekanntes Modell-Alias: ${alias}`,
+            );
+            return;
+          }
 
-        this.sessionContext.setActiveModel(alias);
-        this.view.appendMessage("sys>", `Aktives Modell: ${this.sessionContext.activeModelAlias}`);
+          this.sessionContext.setActiveModel(alias);
+          this.view.appendMessage(
+            "sys>",
+            `Aktives Modell: ${this.sessionContext.activeModelAlias}`,
+          );
+        },
+        onDebug: () => {
+          const next = this.sessionContext.toggleDebug();
+          this.view.appendMessage(
+            "sys>",
+            `Debug-Modus ${next ? "aktiv" : "inaktiv"}.`,
+          );
+        },
+        onReset: () => {
+          this.sessionContext.reset();
+          this.view.appendMessage(
+            "sys>",
+            "Session und Short-Term-Memory zurueckgesetzt.",
+          );
+        },
+        onSleep: (quiet) => this.handleSleepCommand(quiet),
+        onMemoryRoundup: () => this.handleMemoryRoundupCommand(),
+        onMemoryReset: () => {
+          this.sessionContext.reset();
+          this.memoryRepository.resetAllMemory(this.settings);
+          this.view.appendMessage(
+            "sys>",
+            "Short-, Mid- und Long-Term-Memory wurden geleert.",
+          );
+        },
+        onQuit: () => this.onQuit(),
+        onUnknown: (rawCommand) => {
+          this.view.appendMessage("sys>", `Unbekanntes Command: ${rawCommand}`);
+        },
       },
-      onDebug: () => {
-        const next = this.sessionContext.toggleDebug();
-        this.view.appendMessage("sys>", `Debug-Modus ${next ? "aktiv" : "inaktiv"}.`);
-      },
-      onReset: () => {
-        this.sessionContext.reset();
-        this.view.appendMessage("sys>", "Session und Short-Term-Memory zurueckgesetzt.");
-      },
-      onSleep: (quiet) => this.handleSleepCommand(quiet),
-      onMemoryRoundup: () => this.handleMemoryRoundupCommand(),
-      onMemoryReset: () => {
-        this.sessionContext.reset();
-        this.memoryRepository.resetAllMemory(this.settings);
-        this.view.appendMessage("sys>", "Short-, Mid- und Long-Term-Memory wurden geleert.");
-      },
-      onQuit: () => this.onQuit(),
-      onUnknown: (rawCommand) => {
-        this.view.appendMessage("sys>", `Unbekanntes Command: ${rawCommand}`);
-      },
-    });
+    );
   }
 
   abortActiveExecution(): void {
@@ -113,6 +189,10 @@ export class ChatController {
   }
 
   async handlePrompt(rawValue: string): Promise<void> {
+    await this.submitTuiPrompt(rawValue);
+  }
+
+  async submitTuiPrompt(rawValue: string): Promise<void> {
     const value = rawValue.trim();
     if (value.length === 0) {
       return;
@@ -132,33 +212,133 @@ export class ChatController {
       return;
     }
 
-    await this.handleChatPrompt(value);
+    await this.handleChatPrompt(value, {
+      origin: "tui",
+      label: "Anfrage",
+    });
+    this.scheduleExternalQueueDrain();
+  }
+
+  submitExternalRequest(
+    input: ExternalAgentRequestInput,
+    callbacks: ExternalAgentRequestCallbacks,
+  ): AgentRequestSummary {
+    if (
+      this.externalQueue.snapshot().queued.length >=
+      this.settings.controlSocket.maxQueuedRequests
+    ) {
+      throw new Error(
+        `Maximale Queue-Laenge erreicht (${this.settings.controlSocket.maxQueuedRequests}).`,
+      );
+    }
+
+    const summary: AgentRequestSummary = {
+      id: input.id || randomUUID(),
+      origin: "external",
+      prompt: input.prompt,
+      label: input.clientLabel?.trim() || `extern:${input.id.slice(0, 8)}`,
+      status: "queued",
+      queuedAt: new Date().toISOString(),
+      startedAt: null,
+    };
+
+    this.externalQueue.enqueue(summary, { callbacks });
+    this.view.setExternalRequestState(this.externalQueue.snapshot());
+    this.emitExternalEvent(
+      callbacks,
+      {
+        requestId: summary.id,
+        type: "queued",
+        origin: "external",
+        label: summary.label,
+        message: "Externe Anfrage wartet in der Queue.",
+      },
+      true,
+    );
+    this.scheduleExternalQueueDrain();
+    return summary;
+  }
+
+  abortRequest(requestId: string): boolean {
+    const active = this.activeExecution;
+    if (active?.requestId === requestId) {
+      active.controller.abort();
+      const event: AgentExternalEvent = {
+        requestId,
+        type: "aborted",
+        origin: "external",
+        label: active.label,
+        message: "Externe Anfrage wird abgebrochen.",
+      };
+      this.emitExternalEvent(active.externalCallbacks, event, true);
+      return true;
+    }
+
+    const removed = this.externalQueue.removeQueued(requestId);
+    if (!removed) {
+      return false;
+    }
+
+    this.view.setExternalRequestState(this.externalQueue.snapshot());
+    this.emitExternalEvent(
+      removed.metadata.callbacks,
+      {
+        requestId,
+        type: "aborted",
+        origin: "external",
+        label: removed.summary.label,
+        message: "Externe Anfrage wurde vor dem Start entfernt.",
+      },
+      true,
+    );
+    return true;
+  }
+
+  getExternalRequestState() {
+    return this.externalQueue.snapshot();
   }
 
   private async handleSettingsCommand(): Promise<void> {
     try {
-      await this.editorLauncher.open(this.settings.files.settingsPath, this.settings);
-      this.view.appendMessage("sys>", `settings geoeffnet: ${this.settings.files.settingsPath}`);
+      await this.editorLauncher.open(
+        this.settings.files.settingsPath,
+        this.settings,
+      );
+      this.view.appendMessage(
+        "sys>",
+        `settings geoeffnet: ${this.settings.files.settingsPath}`,
+      );
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Editor konnte nicht gestartet werden.";
-      this.view.appendMessage("sys>", `Fehler beim Oeffnen von settings.json: ${message}`);
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Editor konnte nicht gestartet werden.";
+      this.view.appendMessage(
+        "sys>",
+        `Fehler beim Oeffnen von settings.json: ${message}`,
+      );
     }
   }
 
   private formatModels(): string {
     return Object.entries(this.settings.llm.models)
       .map(([alias, modelConfig]) => {
-        const marker = alias === this.sessionContext.activeModelAlias ? "*" : " ";
+        const marker =
+          alias === this.sessionContext.activeModelAlias ? "*" : " ";
         return `${marker} ${alias} -> ${modelConfig.provider}/${modelConfig.model}`;
       })
       .join(" | ");
   }
 
-  private isExecutionAborted(controller: AbortController | null | undefined): boolean {
+  private isExecutionAborted(
+    controller: AbortController | null | undefined,
+  ): boolean {
     return controller?.signal.aborted ?? false;
   }
 
-  private ensureExecutionNotAborted(controller: AbortController | null | undefined): void {
+  private ensureExecutionNotAborted(
+    controller: AbortController | null | undefined,
+  ): void {
     if (this.isExecutionAborted(controller)) {
       throw new InferenceError("Aktuelle Ausfuehrung wurde abgebrochen.");
     }
@@ -166,25 +346,35 @@ export class ChatController {
 
   private async handleUsageCommand(): Promise<void> {
     const query =
-      [...this.sessionContext.sessionEvents].reverse().find((entry) => entry.role === "user")?.content ?? "";
-    const { messages: contextMessages } = await this.contextBuilder.buildContextOverview(
-      query,
-      this.sessionContext.activeModelAlias,
-      this.sessionContext.sessionEvents,
-    );
-    const modelConfig = this.settings.llm.models[this.sessionContext.activeModelAlias];
+      [...this.sessionContext.sessionEvents]
+        .reverse()
+        .find((entry) => entry.role === "user")?.content ?? "";
+    const { messages: contextMessages } =
+      await this.contextBuilder.buildContextOverview(
+        query,
+        this.sessionContext.activeModelAlias,
+        this.sessionContext.sessionEvents,
+      );
+    const modelConfig =
+      this.settings.llm.models[this.sessionContext.activeModelAlias];
     if (!modelConfig) {
-      throw new InferenceError(`Unbekanntes Modell-Alias: ${this.sessionContext.activeModelAlias}`);
+      throw new InferenceError(
+        `Unbekanntes Modell-Alias: ${this.sessionContext.activeModelAlias}`,
+      );
     }
 
     const contextLimits = inferModelContextLimits(modelConfig.model);
     const estimatedPromptTokens = estimateTokensFromMessages(contextMessages);
     const estimatedOutputBudget = modelConfig.maxTokens;
-    const estimatedReservedWindow = estimatedPromptTokens + estimatedOutputBudget;
+    const estimatedReservedWindow =
+      estimatedPromptTokens + estimatedOutputBudget;
     const remainingContext =
       contextLimits.contextWindowTokens === null
         ? null
-        : Math.max(contextLimits.contextWindowTokens - estimatedReservedWindow, 0);
+        : Math.max(
+            contextLimits.contextWindowTokens - estimatedReservedWindow,
+            0,
+          );
 
     this.view.appendMessage(
       "sys>",
@@ -199,19 +389,26 @@ export class ChatController {
   }
 
   private async handleCreditsCommand(): Promise<void> {
-    const modelConfig = this.settings.llm.models[this.sessionContext.activeModelAlias];
+    const modelConfig =
+      this.settings.llm.models[this.sessionContext.activeModelAlias];
     if (!modelConfig) {
-      throw new InferenceError(`Unbekanntes Modell-Alias: ${this.sessionContext.activeModelAlias}`);
+      throw new InferenceError(
+        `Unbekanntes Modell-Alias: ${this.sessionContext.activeModelAlias}`,
+      );
     }
 
     const providerConfig = this.settings.llm.providers[modelConfig.provider];
     if (!providerConfig) {
-      throw new InferenceError(`Provider '${modelConfig.provider}' ist nicht konfiguriert.`);
+      throw new InferenceError(
+        `Provider '${modelConfig.provider}' ist nicht konfiguriert.`,
+      );
     }
 
     const apiKey = process.env[providerConfig.apiKeyEnv];
     if (!apiKey) {
-      throw new InferenceError(`Umgebungsvariable '${providerConfig.apiKeyEnv}' ist nicht gesetzt.`);
+      throw new InferenceError(
+        `Umgebungsvariable '${providerConfig.apiKeyEnv}' ist nicht gesetzt.`,
+      );
     }
 
     const baseUrl = providerConfig.baseUrl.replace(/\/+$/u, "");
@@ -244,8 +441,12 @@ export class ChatController {
         "sys>",
         [
           "Credits: API-Key ist laut Provider nicht limitiert.",
-          typeof creditLimit === "number" ? `Limit ${formatUsd(creditLimit)}` : "",
-          typeof lifetimeUsage === "number" ? `bisher genutzt ${formatUsd(lifetimeUsage)}` : "",
+          typeof creditLimit === "number"
+            ? `Limit ${formatUsd(creditLimit)}`
+            : "",
+          typeof lifetimeUsage === "number"
+            ? `bisher genutzt ${formatUsd(lifetimeUsage)}`
+            : "",
         ]
           .filter((part) => part.length > 0)
           .join(" | "),
@@ -253,7 +454,10 @@ export class ChatController {
       return;
     }
 
-    if (typeof remainingCredits !== "number" || !Number.isFinite(remainingCredits)) {
+    if (
+      typeof remainingCredits !== "number" ||
+      !Number.isFinite(remainingCredits)
+    ) {
       this.view.appendMessage("sys>", "Credits konnten nicht gelesen werden.");
       return;
     }
@@ -262,8 +466,14 @@ export class ChatController {
       pricing === null
         ? null
         : {
-            inputTokens: estimateCreditEquivalentTokens(remainingCredits, pricing.inputUsdPer1M),
-            outputTokens: estimateCreditEquivalentTokens(remainingCredits, pricing.outputUsdPer1M),
+            inputTokens: estimateCreditEquivalentTokens(
+              remainingCredits,
+              pricing.inputUsdPer1M,
+            ),
+            outputTokens: estimateCreditEquivalentTokens(
+              remainingCredits,
+              pricing.outputUsdPer1M,
+            ),
           };
 
     this.view.appendMessage(
@@ -273,8 +483,12 @@ export class ChatController {
         equivalent === null
           ? "Token-Aequivalent unbekannt fuer dieses Modell"
           : `ca. ${equivalent.inputTokens} Input-Tokens oder ${equivalent.outputTokens} Output-Tokens mit ${modelConfig.model}`,
-        typeof creditLimit === "number" ? `Key-Limit ${formatUsd(creditLimit)}` : "",
-        typeof lifetimeUsage === "number" ? `bisher genutzt ${formatUsd(lifetimeUsage)}` : "",
+        typeof creditLimit === "number"
+          ? `Key-Limit ${formatUsd(creditLimit)}`
+          : "",
+        typeof lifetimeUsage === "number"
+          ? `bisher genutzt ${formatUsd(lifetimeUsage)}`
+          : "",
       ]
         .filter((part) => part.length > 0)
         .join(" | "),
@@ -283,7 +497,10 @@ export class ChatController {
 
   private async handleSleepCommand(quiet: boolean): Promise<void> {
     if (this.activeExecution) {
-      this.view.appendMessage("sys>", `Bereits aktiv: ${this.activeExecution.label}. Esc bricht die laufende Ausfuehrung ab.`);
+      this.view.appendMessage(
+        "sys>",
+        `Bereits aktiv: ${this.activeExecution.label}. Esc bricht die laufende Ausfuehrung ab.`,
+      );
       return;
     }
 
@@ -291,14 +508,23 @@ export class ChatController {
       this.settings,
       this.sessionContext.sessionEvents,
     );
-    const shortTermDebug = this.memoryRepository.loadShortTermMemorySnapshotWithDebug(
+    const shortTermDebug =
+      this.memoryRepository.loadShortTermMemorySnapshotWithDebug(
+        this.settings,
+        this.sessionContext.sessionEvents,
+      ).debug;
+    const sleepFeedback = this.memoryRepository.loadSleepFeedback(
       this.settings,
-      this.sessionContext.sessionEvents,
-    ).debug;
-    const sleepFeedback = this.memoryRepository.loadSleepFeedback(this.settings);
+    );
     const failureFeedback = this.collectFailureFeedback();
-    const debugCollector = this.sessionContext.debugEnabled ? new DebugCollector() : undefined;
-    const sleepMessages = buildSleepMessages(snapshot, sleepFeedback, failureFeedback);
+    const debugCollector = this.sessionContext.debugEnabled
+      ? new DebugCollector()
+      : undefined;
+    const sleepMessages = buildSleepMessages(
+      snapshot,
+      sleepFeedback,
+      failureFeedback,
+    );
 
     if (snapshot.length === 0) {
       this.sessionContext.reset();
@@ -311,10 +537,14 @@ export class ChatController {
       return;
     }
 
-    this.view.setTransientStatus("Short-Term-Memory wird verdichtet", "request");
+    this.view.setTransientStatus(
+      "Short-Term-Memory wird verdichtet",
+      "request",
+    );
     const execution = {
       controller: new AbortController(),
       label: quiet ? "Sleepquiet" : "Sleep",
+      origin: "tui" as const,
     };
     this.activeExecution = execution;
 
@@ -341,17 +571,22 @@ export class ChatController {
         ),
       );
       const merged = mergeConsolidationFragments(parsed);
-      const storedMidTermFragments = await this.memoryRepository.storeMidTermMemoryFragments(
-        this.settings,
-        merged.midTermFragments,
-        debugCollector,
-      );
-      const storedLongTermFragments = await this.memoryRepository.storeLongTermMemoryFragments(
-        this.settings,
-        merged.longTermFragments,
-        debugCollector,
-      );
-      const storedFragments = [...storedMidTermFragments, ...storedLongTermFragments];
+      const storedMidTermFragments =
+        await this.memoryRepository.storeMidTermMemoryFragments(
+          this.settings,
+          merged.midTermFragments,
+          debugCollector,
+        );
+      const storedLongTermFragments =
+        await this.memoryRepository.storeLongTermMemoryFragments(
+          this.settings,
+          merged.longTermFragments,
+          debugCollector,
+        );
+      const storedFragments = [
+        ...storedMidTermFragments,
+        ...storedLongTermFragments,
+      ];
 
       this.sessionContext.reset();
       this.view.clearTransientStatus();
@@ -361,30 +596,44 @@ export class ChatController {
           renderDebugReport(
             {
               modelAlias: this.sessionContext.activeModelAlias,
-              providerName: this.settings.llm.models[this.sessionContext.activeModelAlias]?.provider ?? "unbekannt",
-              providerModelId: this.settings.llm.models[this.sessionContext.activeModelAlias]?.model ?? "unbekannt",
+              providerName:
+                this.settings.llm.models[this.sessionContext.activeModelAlias]
+                  ?.provider ?? "unbekannt",
+              providerModelId:
+                this.settings.llm.models[this.sessionContext.activeModelAlias]
+                  ?.model ?? "unbekannt",
               promptSegments: [
                 {
                   label: "Sleep-Systemprompt",
                   role: "system",
                   content: sleepMessages[0]?.content ?? "",
                 },
-                { label: "Sleep-User-Snapshot", role: "user", content: sleepMessages[1]?.content ?? snapshot },
+                {
+                  label: "Sleep-User-Snapshot",
+                  role: "user",
+                  content: sleepMessages[1]?.content ?? snapshot,
+                },
               ],
               shortTerm: shortTermDebug,
               midTerm: {
                 tier: "midTerm",
                 query: quiet ? "sleepquiet" : "sleep",
                 retrievalMode: "empty",
-                embeddingAttempted: debugCollector.snapshot().embeddings.some(
-                  (event) => event.purpose === "memory_store_sleep" && event.tier === "midTerm",
-                ),
-                embeddingSucceeded: debugCollector.snapshot().embeddings.some(
-                  (event) =>
-                    event.purpose === "memory_store_sleep" &&
-                    event.tier === "midTerm" &&
-                    event.success,
-                ),
+                embeddingAttempted: debugCollector
+                  .snapshot()
+                  .embeddings.some(
+                    (event) =>
+                      event.purpose === "memory_store_sleep" &&
+                      event.tier === "midTerm",
+                  ),
+                embeddingSucceeded: debugCollector
+                  .snapshot()
+                  .embeddings.some(
+                    (event) =>
+                      event.purpose === "memory_store_sleep" &&
+                      event.tier === "midTerm" &&
+                      event.success,
+                  ),
                 usedEntries: [],
                 text: `Gespeicherte Fragmente: ${storedMidTermFragments.map((fragment) => fragment.title).join(" | ") || "(keine)"}`,
               },
@@ -392,15 +641,21 @@ export class ChatController {
                 tier: "longTerm",
                 query: quiet ? "sleepquiet" : "sleep",
                 retrievalMode: "empty",
-                embeddingAttempted: debugCollector.snapshot().embeddings.some(
-                  (event) => event.purpose === "memory_store_sleep" && event.tier === "longTerm",
-                ),
-                embeddingSucceeded: debugCollector.snapshot().embeddings.some(
-                  (event) =>
-                    event.purpose === "memory_store_sleep" &&
-                    event.tier === "longTerm" &&
-                    event.success,
-                ),
+                embeddingAttempted: debugCollector
+                  .snapshot()
+                  .embeddings.some(
+                    (event) =>
+                      event.purpose === "memory_store_sleep" &&
+                      event.tier === "longTerm",
+                  ),
+                embeddingSucceeded: debugCollector
+                  .snapshot()
+                  .embeddings.some(
+                    (event) =>
+                      event.purpose === "memory_store_sleep" &&
+                      event.tier === "longTerm" &&
+                      event.success,
+                  ),
                 usedEntries: [],
                 text: `Gespeicherte Fragmente: ${storedLongTermFragments.map((fragment) => fragment.title).join(" | ") || "(keine)"}`,
               },
@@ -411,8 +666,12 @@ export class ChatController {
       }
 
       if (quiet) {
-        const createdCount = storedFragments.filter((fragment) => fragment.action === "created").length;
-        const updatedCount = storedFragments.filter((fragment) => fragment.action === "updated").length;
+        const createdCount = storedFragments.filter(
+          (fragment) => fragment.action === "created",
+        ).length;
+        const updatedCount = storedFragments.filter(
+          (fragment) => fragment.action === "updated",
+        ).length;
         this.view.appendMessage(
           "sys>",
           `Sleep abgeschlossen. ${storedFragments.length} Fragmente gespeichert (${createdCount} neu, ${updatedCount} aktualisiert; MTM ${storedMidTermFragments.length}, LTM ${storedLongTermFragments.length}).`,
@@ -421,13 +680,20 @@ export class ChatController {
       }
 
       if (storedFragments.length === 0) {
-        this.view.appendMessage("sys>", "Sleep abgeschlossen. Keine relevanten Mid-/Long-Term-Fragmente gespeichert.");
+        this.view.appendMessage(
+          "sys>",
+          "Sleep abgeschlossen. Keine relevanten Mid-/Long-Term-Fragmente gespeichert.",
+        );
         return;
       }
 
       this.view.appendMessage(
         "sys>",
-        this.summarizeStoredFragments("Sleep abgeschlossen", storedMidTermFragments, storedLongTermFragments),
+        this.summarizeStoredFragments(
+          "Sleep abgeschlossen",
+          storedMidTermFragments,
+          storedLongTermFragments,
+        ),
       );
     } catch (error) {
       this.view.clearTransientStatus();
@@ -449,7 +715,9 @@ export class ChatController {
     }
   }
 
-  private dedupeFeedbackEntries(entries: MemoryFeedbackEntry[]): MemoryFeedbackEntry[] {
+  private dedupeFeedbackEntries(
+    entries: MemoryFeedbackEntry[],
+  ): MemoryFeedbackEntry[] {
     const seen = new Set<string>();
     const deduped: MemoryFeedbackEntry[] = [];
 
@@ -469,12 +737,17 @@ export class ChatController {
       });
     }
 
-    return deduped.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    return deduped.sort((left, right) =>
+      right.createdAt.localeCompare(left.createdAt),
+    );
   }
 
   private collectFailureFeedback(): MemoryFeedbackEntry[] {
-    const persistedFeedback = this.memoryRepository.loadMemoryFeedback(this.settings);
-    const persistedEntries = this.memoryRepository.loadPersistedShortTermEntries(this.settings);
+    const persistedFeedback = this.memoryRepository.loadMemoryFeedback(
+      this.settings,
+    );
+    const persistedEntries =
+      this.memoryRepository.loadPersistedShortTermEntries(this.settings);
     const extracted = extractFailureFeedbackFromShortTermEntries([
       ...persistedEntries,
       ...this.sessionContext.sessionEvents,
@@ -493,13 +766,19 @@ export class ChatController {
     }
 
     return `${prefix}. MTM ${midTermFragments.length}, LTM ${longTermFragments.length}: ${combined
-      .map((fragment) => `${fragment.title} [${fragment.action === "created" ? "neu" : "aktualisiert"}]`)
+      .map(
+        (fragment) =>
+          `${fragment.title} [${fragment.action === "created" ? "neu" : "aktualisiert"}]`,
+      )
       .join(" | ")}`;
   }
 
   private async handleMemoryRoundupCommand(): Promise<void> {
     if (this.activeExecution) {
-      this.view.appendMessage("sys>", `Bereits aktiv: ${this.activeExecution.label}. Esc bricht die laufende Ausfuehrung ab.`);
+      this.view.appendMessage(
+        "sys>",
+        `Bereits aktiv: ${this.activeExecution.label}. Esc bricht die laufende Ausfuehrung ab.`,
+      );
       return;
     }
 
@@ -508,22 +787,35 @@ export class ChatController {
       this.memoryRepository.loadLongTermMemoryFragments(this.settings),
     ]);
     const failureFeedback = this.collectFailureFeedback();
-    if (midTermFragments.length === 0 && longTermFragments.length === 0 && failureFeedback.length === 0) {
-      this.view.appendMessage("sys>", "Memory-Roundup beendet. Kein persistiertes Memory oder Feedback vorhanden.");
+    if (
+      midTermFragments.length === 0 &&
+      longTermFragments.length === 0 &&
+      failureFeedback.length === 0
+    ) {
+      this.view.appendMessage(
+        "sys>",
+        "Memory-Roundup beendet. Kein persistiertes Memory oder Feedback vorhanden.",
+      );
       return;
     }
 
-    const debugCollector = this.sessionContext.debugEnabled ? new DebugCollector() : undefined;
+    const debugCollector = this.sessionContext.debugEnabled
+      ? new DebugCollector()
+      : undefined;
     const roundupMessages = buildMemoryRoundupMessages(
       midTermFragments,
       longTermFragments,
       this.memoryRepository.loadMemoryFeedback(this.settings),
       failureFeedback,
     );
-    this.view.setTransientStatus("Persistentes Memory wird ueberarbeitet", "request");
+    this.view.setTransientStatus(
+      "Persistentes Memory wird ueberarbeitet",
+      "request",
+    );
     const execution = {
       controller: new AbortController(),
       label: "Memoryroundup",
+      origin: "tui" as const,
     };
     this.activeExecution = execution;
 
@@ -550,21 +842,27 @@ export class ChatController {
         ) * 2,
       );
       const merged = mergeConsolidationFragments(parsed);
-      const storedMidTermFragments = await this.memoryRepository.replaceMidTermMemoryFragments(
-        this.settings,
-        merged.midTermFragments,
-        debugCollector,
-      );
-      const storedLongTermFragments = await this.memoryRepository.replaceLongTermMemoryFragments(
-        this.settings,
-        merged.longTermFragments,
-        debugCollector,
-      );
+      const storedMidTermFragments =
+        await this.memoryRepository.replaceMidTermMemoryFragments(
+          this.settings,
+          merged.midTermFragments,
+          debugCollector,
+        );
+      const storedLongTermFragments =
+        await this.memoryRepository.replaceLongTermMemoryFragments(
+          this.settings,
+          merged.longTermFragments,
+          debugCollector,
+        );
 
       this.view.clearTransientStatus();
       this.view.appendMessage(
         "sys>",
-        this.summarizeStoredFragments("Memory-Roundup abgeschlossen", storedMidTermFragments, storedLongTermFragments),
+        this.summarizeStoredFragments(
+          "Memory-Roundup abgeschlossen",
+          storedMidTermFragments,
+          storedLongTermFragments,
+        ),
       );
     } catch (error) {
       this.view.clearTransientStatus();
@@ -578,7 +876,10 @@ export class ChatController {
         outcome: "failure",
         message,
       });
-      this.view.appendMessage("sys>", `Memory-Roundup fehlgeschlagen: ${message}`);
+      this.view.appendMessage(
+        "sys>",
+        `Memory-Roundup fehlgeschlagen: ${message}`,
+      );
     } finally {
       if (this.activeExecution?.controller === execution.controller) {
         this.activeExecution = null;
@@ -586,7 +887,10 @@ export class ChatController {
     }
   }
 
-  private async handleChatPrompt(value: string): Promise<void> {
+  private async handleChatPrompt(
+    value: string,
+    options: ChatPromptOptions,
+  ): Promise<void> {
     const startedAt = Date.now();
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
@@ -596,15 +900,41 @@ export class ChatController {
       missingTool: 0,
     };
 
-    this.view.setTransientStatus(`${this.sessionContext.activeModelAlias} antwortet`, "request");
-    const execution = {
+    this.view.setTransientStatus(
+      `${this.sessionContext.activeModelAlias} antwortet`,
+      "request",
+    );
+    const execution: ActiveExecutionState = {
       controller: new AbortController(),
-      label: "Anfrage",
+      label: options.label,
+      origin: options.origin,
     };
+    if (options.requestId) {
+      execution.requestId = options.requestId;
+    }
+    if (options.externalCallbacks) {
+      execution.externalCallbacks = options.externalCallbacks;
+    }
     this.activeExecution = execution;
 
+    if (options.origin === "external" && options.requestId) {
+      this.emitExternalEvent(
+        options.externalCallbacks,
+        {
+          requestId: options.requestId,
+          type: "started",
+          origin: "external",
+          label: options.label,
+          message: "Externe Anfrage wird ausgefuehrt.",
+        },
+        true,
+      );
+    }
+
     try {
-      const debugCollector = this.sessionContext.debugEnabled ? new DebugCollector() : undefined;
+      const debugCollector = this.sessionContext.debugEnabled
+        ? new DebugCollector()
+        : undefined;
       const contextEvents = this.sessionContext.sessionEvents;
       this.sessionContext.pushEvent({
         role: "user",
@@ -633,12 +963,18 @@ export class ChatController {
           parts.push(`Tool-Nachforderung ${correctionCounts.missingTool}x`);
         }
         if (parts.length > 0) {
-          this.view.appendMessage("sys>", `Loop-Korrektur: ${parts.join(" | ")}`);
+          this.view.appendMessage(
+            "sys>",
+            `Loop-Korrektur: ${parts.join(" | ")}`,
+          );
         }
       };
 
       while (finalText === null) {
-        this.view.setTransientStatus(`${this.sessionContext.activeModelAlias} antwortet`, "request");
+        this.view.setTransientStatus(
+          `${this.sessionContext.activeModelAlias} antwortet`,
+          "request",
+        );
         this.sessionContext.pushEvent({
           role: "system",
           kind: "model_request",
@@ -649,7 +985,11 @@ export class ChatController {
             modelAlias: this.sessionContext.activeModelAlias,
             ...this.sessionContext.snapshotMessages(conversation),
             ...(roundtripCount === 0
-              ? { promptSegments: requestDebug.promptSegments.map((segment) => ({ ...segment })) }
+              ? {
+                  promptSegments: requestDebug.promptSegments.map(
+                    (segment) => ({ ...segment }),
+                  ),
+                }
               : {}),
           },
         });
@@ -660,6 +1000,19 @@ export class ChatController {
         const streamCallbacks: ChatCompletionStreamCallbacks = {
           onTextDelta: (delta) => {
             streamedResponseText += delta;
+            if (options.origin === "external" && options.requestId) {
+              this.emitExternalEvent(
+                options.externalCallbacks,
+                {
+                  requestId: options.requestId,
+                  type: "stream",
+                  origin: "external",
+                  label: options.label,
+                  chunk: delta,
+                },
+                false,
+              );
+            }
             if (streamedResponseIndex === null) {
               streamedResponseIndex = this.view.appendMessage("agent>", delta);
               return;
@@ -669,7 +1022,11 @@ export class ChatController {
           onReasoningDelta: (delta) => {
             streamedReasoningText += delta;
             if (streamedReasoningIndex === null) {
-              streamedReasoningIndex = this.view.appendMessage("think>", delta, "reasoning");
+              streamedReasoningIndex = this.view.appendMessage(
+                "think>",
+                delta,
+                "reasoning",
+              );
               return;
             }
             this.view.appendToMessage(streamedReasoningIndex, delta);
@@ -697,21 +1054,31 @@ export class ChatController {
           metadata: {
             roundtrip: roundtripCount + 1,
             modelAlias: result.modelAlias,
-            providerName: result.providerName,
-            providerModelId: result.providerModelId,
-            text: result.text,
-            reasoning: result.reasoning,
-            usage: result.usage,
-            requestBody: result.requestBody,
-            rawResponse: result.rawResponse,
+            ...(debugCollector
+              ? {
+                  providerName: result.providerName,
+                  providerModelId: result.providerModelId,
+                  text: result.text,
+                  reasoning: result.reasoning,
+                  usage: result.usage,
+                  requestBody: result.requestBody,
+                  rawResponse: result.rawResponse,
+                }
+              : {}),
           },
         });
-        if (result.reasoning.length > 0 || streamedReasoningText.trim().length > 0) {
+        if (
+          result.reasoning.length > 0 ||
+          streamedReasoningText.trim().length > 0
+        ) {
           this.sessionContext.pushEvent({
             role: "assistant",
             kind: "reasoning",
             includeInPrompt: true,
-            content: result.reasoning.length > 0 ? result.reasoning : streamedReasoningText.trim(),
+            content:
+              result.reasoning.length > 0
+                ? result.reasoning
+                : streamedReasoningText.trim(),
             metadata: {
               roundtrip: roundtripCount + 1,
               modelAlias: result.modelAlias,
@@ -737,14 +1104,18 @@ export class ChatController {
           break;
         }
 
-        const parsedResponse = parseAssistantToolResponse(result.text);
-        if (!parsedResponse) {
+        const parsedResponseAnalysis = analyzeAssistantToolResponse(
+          result.text,
+        );
+        if (!parsedResponseAnalysis.ok) {
           if (streamedResponseIndex !== null) {
             this.view.updateMessage(streamedResponseIndex, {
               prefix: "sys>",
               message: [
-                "Ungueltige Modellantwort erhalten. Die Rohantwort wurde verworfen.",
-                streamedResponseText.trim(),
+                `Tool-Parser konnte die Modellantwort nicht verwerten: ${parsedResponseAnalysis.details}`,
+                parsedResponseAnalysis.snippet.length > 0
+                  ? `Antwortauszug: ${parsedResponseAnalysis.snippet}`
+                  : "",
               ]
                 .filter((part) => part.length > 0)
                 .join("\n\n"),
@@ -752,7 +1123,9 @@ export class ChatController {
           }
           roundtripCount += 1;
           if (roundtripCount > this.settings.tools.maxRoundtrips) {
-            throw new InferenceError(`Maximale Tool-Roundtrips erreicht (${this.settings.tools.maxRoundtrips}).`);
+            throw new InferenceError(
+              `Maximale Tool-Roundtrips erreicht (${this.settings.tools.maxRoundtrips}).`,
+            );
           }
 
           conversation.push({
@@ -767,28 +1140,39 @@ export class ChatController {
             role: "system",
             kind: "loop_correction",
             includeInPrompt: true,
-            content: "Ungueltige Modellantwort. JSON-Antwort wurde nachgefordert.",
+            content: `Tool-Parser-Fehler: ${parsedResponseAnalysis.details}`,
             metadata: {
               roundtrip: roundtripCount,
               rawAssistantText: result.text,
+              parseReason: parsedResponseAnalysis.reason,
+              parseDetails: parsedResponseAnalysis.details,
+              parseSnippet: parsedResponseAnalysis.snippet,
             },
           });
           correctionCounts.invalidJson += 1;
-          this.view.setTransientStatus("Antwortformat wird korrigiert", "request");
+          this.view.setTransientStatus(
+            "Antwortformat wird korrigiert",
+            "request",
+          );
           continue;
         }
+
+        const parsedResponse = parsedResponseAnalysis.response;
 
         if (parsedResponse.type === "final") {
           if (!sawToolCall) {
             if (streamedResponseIndex !== null) {
               this.view.updateMessage(streamedResponseIndex, {
                 prefix: "sys>",
-                message: "Final-Antwort ohne vorherige Tool-Nutzung erhalten. Es wird ein Tool-Call nachgefordert.",
+                message:
+                  "Final-Antwort ohne vorherige Tool-Nutzung erhalten. Es wird ein Tool-Call nachgefordert.",
               });
             }
             roundtripCount += 1;
             if (roundtripCount > this.settings.tools.maxRoundtrips) {
-              throw new InferenceError(`Maximale Tool-Roundtrips erreicht (${this.settings.tools.maxRoundtrips}).`);
+              throw new InferenceError(
+                `Maximale Tool-Roundtrips erreicht (${this.settings.tools.maxRoundtrips}).`,
+              );
             }
 
             conversation.push({
@@ -803,14 +1187,72 @@ export class ChatController {
               role: "system",
               kind: "loop_correction",
               includeInPrompt: true,
-              content: "Final-Antwort ohne Tool. Tool-Call wurde nachgefordert.",
+              content:
+                "Final-Antwort ohne Tool. Tool-Call wurde nachgefordert.",
               metadata: {
                 roundtrip: roundtripCount,
                 rawAssistantText: result.text,
               },
             });
             correctionCounts.missingTool += 1;
-            this.view.setTransientStatus("Tool-Nutzung wird nachgefordert", "request");
+            this.view.setTransientStatus(
+              "Tool-Nutzung wird nachgefordert",
+              "request",
+            );
+            continue;
+          }
+
+          const completionReview = await runModuleCompletionCheck(
+            this.settings,
+            this.agentModuleService,
+          );
+          if (completionReview.blockers.length > 0) {
+            if (streamedResponseIndex !== null) {
+              this.view.updateMessage(streamedResponseIndex, {
+                prefix: "sys>",
+                message:
+                  "Final-Antwort wurde blockiert, weil laufende Module noch offene Punkte gemeldet haben.",
+              });
+            }
+
+            roundtripCount += 1;
+            if (roundtripCount > this.settings.tools.maxRoundtrips) {
+              throw new InferenceError(
+                `Maximale Tool-Roundtrips erreicht (${this.settings.tools.maxRoundtrips}).`,
+              );
+            }
+
+            const blockerSummary = formatModuleCompletionBlockersForPrompt(
+              completionReview.blockers,
+            );
+            conversation.push({
+              role: "user",
+              content: [
+                "Laufende Module haben noch offene Punkte gemeldet, die du vor dem Abschluss bearbeiten oder bewusst klaeren musst.",
+                "<Blocker>\n" + blockerSummary + "\n</Blocker>",
+                "Arbeite diese Punkte jetzt ab und antworte danach wieder mit genau einem JSON-Objekt im vereinbarten Format.",
+              ].join("\n\n"),
+            });
+            this.sessionContext.pushEvent({
+              role: "system",
+              kind: "loop_correction",
+              includeInPrompt: true,
+              content: `Completion-Check blockiert final: ${completionReview.blockers.map((blocker) => `${blocker.moduleName}: ${blocker.summary}`).join(" | ")}`,
+              metadata: {
+                roundtrip: roundtripCount,
+                reviewedModules: completionReview.reviewedModules,
+                skippedModules: completionReview.skippedModules,
+                blockers: completionReview.blockers.map((blocker) => ({
+                  moduleName: blocker.moduleName,
+                  summary: blocker.summary,
+                  openPoints: blocker.openPoints,
+                })),
+              },
+            });
+            this.view.setTransientStatus(
+              "Offene Modul-Punkte muessen geklaert werden",
+              "request",
+            );
             continue;
           }
 
@@ -826,7 +1268,9 @@ export class ChatController {
 
         roundtripCount += 1;
         if (roundtripCount > this.settings.tools.maxRoundtrips) {
-          throw new InferenceError(`Maximale Tool-Roundtrips erreicht (${this.settings.tools.maxRoundtrips}).`);
+          throw new InferenceError(
+            `Maximale Tool-Roundtrips erreicht (${this.settings.tools.maxRoundtrips}).`,
+          );
         }
 
         sawToolCall = true;
@@ -842,7 +1286,10 @@ export class ChatController {
             arguments: parsedResponse.call.arguments ?? null,
           },
         });
-        this.view.setTransientStatus(`Tool ${toolExecutionCount}: ${parsedResponse.call.tool} laeuft`, "tool");
+        this.view.setTransientStatus(
+          `Tool ${toolExecutionCount}: ${parsedResponse.call.tool} laeuft`,
+          "tool",
+        );
         if (streamedResponseIndex !== null) {
           this.view.updateMessage(streamedResponseIndex, {
             prefix: "sys>",
@@ -876,9 +1323,14 @@ export class ChatController {
           this.ensureExecutionNotAborted(execution.controller);
 
           if (toolResult.ok && toolResult.tool === "create_typescript_file") {
-            const createdPath = typeof toolResult.output.path === "string" ? toolResult.output.path : "";
+            const createdPath =
+              typeof toolResult.output.path === "string"
+                ? toolResult.output.path
+                : "";
             const createdDescription =
-              typeof toolResult.output.description === "string" ? toolResult.output.description : "";
+              typeof toolResult.output.description === "string"
+                ? toolResult.output.description
+                : "";
             if (createdPath.length > 0) {
               this.sessionContext.createdScripts.set(createdPath, {
                 description: createdDescription,
@@ -888,23 +1340,31 @@ export class ChatController {
           }
 
           if (toolResult.ok && toolResult.tool === "run_typescript_file") {
-            const scriptPath = typeof toolResult.output.path === "string" ? toolResult.output.path : "";
+            const scriptPath =
+              typeof toolResult.output.path === "string"
+                ? toolResult.output.path
+                : "";
             const normalizedArgs = Array.isArray(toolResult.output.args)
-              ? toolResult.output.args.filter((entry): entry is string => typeof entry === "string")
+              ? toolResult.output.args.filter(
+                  (entry): entry is string => typeof entry === "string",
+                )
               : [];
 
             if (scriptPath.length > 0) {
-              const publication = await this.publishCreatedScriptAfterSuccessfulRun(
-                scriptPath,
-                JSON.stringify(toolResult, null, 2),
-                normalizedArgs,
-                debugCollector,
-              );
+              const publication =
+                await this.publishCreatedScriptAfterSuccessfulRun(
+                  scriptPath,
+                  JSON.stringify(toolResult, null, 2),
+                  normalizedArgs,
+                  debugCollector,
+                );
 
               if (publication.registryPublished) {
                 toolResult.output.registryPublished = true;
-                toolResult.output.registryEmbeddingUsed = publication.registryEmbeddingUsed;
-                toolResult.output.midTermMemoryStored = publication.midTermStored;
+                toolResult.output.registryEmbeddingUsed =
+                  publication.registryEmbeddingUsed;
+                toolResult.output.midTermMemoryStored =
+                  publication.midTermStored;
                 if (publication.title) {
                   toolResult.output.midTermTitle = publication.title;
                 }
@@ -915,9 +1375,15 @@ export class ChatController {
           toolResultText = JSON.stringify(toolResult, null, 2);
           toolSummary = toolResult.summary;
           toolSucceeded = toolResult.ok;
-          this.view.appendMessage("tool>", `Tool ${toolExecutionCount}: ${toolSummary}`);
+          this.view.appendMessage(
+            "tool>",
+            `Tool ${toolExecutionCount}: ${toolSummary}`,
+          );
         } catch (error) {
-          const message = error instanceof Error ? error.message : "Unbekannter Fehler bei der Tool-Ausfuehrung.";
+          const message =
+            error instanceof Error
+              ? error.message
+              : "Unbekannter Fehler bei der Tool-Ausfuehrung.";
           toolSummary = "Tool-Ausfuehrung fehlgeschlagen.";
           toolResultText = JSON.stringify(
             {
@@ -938,7 +1404,10 @@ export class ChatController {
             message: `${parsedResponse.call.tool}: ${message}`,
           });
           this.view.clearTransientStatus();
-          this.view.appendMessage("tool>", `Tool ${toolExecutionCount}: Fehler: ${message}`);
+          this.view.appendMessage(
+            "tool>",
+            `Tool ${toolExecutionCount}: Fehler: ${message}`,
+          );
         }
 
         this.sessionContext.pushEvent({
@@ -950,7 +1419,11 @@ export class ChatController {
             roundtrip: roundtripCount,
             tool: parsedResponse.call.tool,
             success: toolSucceeded,
-            result: JSON.parse(toolResultText) as Record<string, unknown>,
+            ...(debugCollector
+              ? {
+                  result: JSON.parse(toolResultText) as Record<string, unknown>,
+                }
+              : {}),
           },
         });
 
@@ -965,7 +1438,9 @@ export class ChatController {
       }
 
       if (finalText === null) {
-        throw new InferenceError("Agent-Loop wurde ohne finale Antwort beendet.");
+        throw new InferenceError(
+          "Agent-Loop wurde ohne finale Antwort beendet.",
+        );
       }
 
       this.sessionContext.pushEvent({
@@ -977,7 +1452,9 @@ export class ChatController {
       this.view.clearTransientStatus();
       flushCorrectionSummary();
       if (debugCollector) {
-        this.view.renderDebugReport(renderDebugReport(requestDebug, debugCollector.snapshot()));
+        this.view.renderDebugReport(
+          renderDebugReport(requestDebug, debugCollector.snapshot()),
+        );
       }
       if (!this.settings.tools.enabled) {
         this.view.appendMessage("agent>", finalText);
@@ -986,6 +1463,19 @@ export class ChatController {
         "sys>",
         `Zeit: ${formatDuration(Date.now() - startedAt)} | in: ${formatTokenCount(sawUsage ? totalInputTokens : null)} | out: ${formatTokenCount(sawUsage ? totalOutputTokens : null)}`,
       );
+      if (options.origin === "external" && options.requestId) {
+        this.emitExternalEvent(
+          options.externalCallbacks,
+          {
+            requestId: options.requestId,
+            type: "completed",
+            origin: "external",
+            label: options.label,
+            message: finalText,
+          },
+          true,
+        );
+      }
     } catch (error) {
       this.view.clearTransientStatus();
       const message =
@@ -1010,11 +1500,76 @@ export class ChatController {
         message,
       });
       this.view.appendMessage("sys>", message);
+      if (options.origin === "external" && options.requestId) {
+        this.emitExternalEvent(
+          options.externalCallbacks,
+          {
+            requestId: options.requestId,
+            type: execution.controller.signal.aborted ? "aborted" : "failed",
+            origin: "external",
+            label: options.label,
+            message,
+          },
+          true,
+        );
+      }
     } finally {
       if (this.activeExecution?.controller === execution.controller) {
         this.activeExecution = null;
       }
+      if (options.origin === "external") {
+        this.externalQueue.completeActive();
+        this.view.setExternalRequestState(this.externalQueue.snapshot());
+        this.scheduleExternalQueueDrain();
+      }
     }
+  }
+
+  private emitExternalEvent(
+    callbacks: ExternalAgentRequestCallbacks | undefined,
+    event: AgentExternalEvent,
+    updateView: boolean,
+  ): void {
+    callbacks?.onEvent(event);
+    if (updateView) {
+      this.view.notifyExternalEvent(event);
+      this.view.setExternalRequestState(this.externalQueue.snapshot());
+    }
+  }
+
+  private scheduleExternalQueueDrain(): void {
+    if (this.externalDrainScheduled) {
+      return;
+    }
+
+    this.externalDrainScheduled = true;
+    setTimeout(() => {
+      this.externalDrainScheduled = false;
+      void this.drainExternalQueue();
+    }, 0);
+  }
+
+  private async drainExternalQueue(): Promise<void> {
+    if (this.activeExecution) {
+      return;
+    }
+
+    const next = this.externalQueue.startNext();
+    if (!next) {
+      this.view.setExternalRequestState(this.externalQueue.snapshot());
+      return;
+    }
+
+    const startedAt = new Date().toISOString();
+    this.externalQueue.updateStatus(next.summary.id, "running", startedAt);
+    this.view.setExternalRequestState(this.externalQueue.snapshot());
+
+    await this.handleChatPrompt(next.summary.prompt, {
+      origin: "external",
+      requestId: next.summary.id,
+      label: next.summary.label,
+      externalCallbacks: next.metadata.callbacks,
+    });
   }
 
   private async publishCreatedScriptAfterSuccessfulRun(
@@ -1028,7 +1583,8 @@ export class ChatController {
     midTermStored: boolean;
     title?: string;
   }> {
-    const createdScript = this.sessionContext.createdScripts.get(absoluteScriptPath);
+    const createdScript =
+      this.sessionContext.createdScripts.get(absoluteScriptPath);
     if (!createdScript || createdScript.publishedAfterSuccessfulRun) {
       return {
         registryPublished: false,
@@ -1083,16 +1639,17 @@ export class ChatController {
       knowledge.usage,
       debugCollector,
     );
-    const storedFragments = await this.memoryRepository.storeMidTermMemoryFragments(
-      this.settings,
-      [
-        {
-          title: knowledge.midTermTitle,
-          content: knowledge.midTermContent,
-        },
-      ],
-      debugCollector,
-    );
+    const storedFragments =
+      await this.memoryRepository.storeMidTermMemoryFragments(
+        this.settings,
+        [
+          {
+            title: knowledge.midTermTitle,
+            content: knowledge.midTermContent,
+          },
+        ],
+        debugCollector,
+      );
 
     this.sessionContext.createdScripts.set(absoluteScriptPath, {
       ...createdScript,

@@ -94,15 +94,17 @@ Die Tool-Implementierungen liegen modular unter [src/tools](/Users/frankhildebra
 - `prompt.ts` baut den Tool-spezifischen Prompt aus den registrierten Metadaten
 - `parse.ts` validiert Tool-Responses gegen die Registry
 
-Aktuell sind drei Tools registriert:
+Aktuell sind folgende Script- und Inline-Tools registriert:
 
 - `query_script_registry` durchsucht bekannte Hilfsskripte ueber Registry-Metadaten und Embedding-Suche
 - `create_typescript_file` erzeugt `.ts`-Dateien innerhalb von `tools.scriptsDir` und veroeffentlicht sie mit Hilfetext in der Registry
 - `run_typescript_file` fuehrt diese Dateien mit `tsx` aus und gibt `stdout`, `stderr`, Exitcode und Timeout-Status an das Modell zurueck
+- `exec_typescript_in_script_path` fuehrt ad-hoc TypeScript relativ zu `tools.scriptsDir` oder einem konkreten Script-Pfad aus
 
 Zusätzlich gibt es jetzt Modul-Tools fuer Worker unter `./agent_modules`:
 
 - `discover_agent_modules` findet installierte Module und liefert kompakte Capability-Summaries
+- `exec_typescript_in_agent_module` fuehrt ad-hoc TypeScript direkt im Verzeichnis eines bestehenden Moduls aus
 - `start_agent_module` startet ein Modul ueber `npm run start` und wartet auf Socket plus Handshake
 - `stop_agent_module` beendet ein zuvor gestartetes Modul
 - `call_agent_module` sendet JSON-Lines-Requests an ein laufendes oder bei Bedarf automatisch gestartetes Modul
@@ -127,9 +129,22 @@ Der Host-Agent discovert Module zweistufig:
 
 Module werden ueber `npm run start` im Modulverzeichnis gestartet. Der erwartete Socket liegt standardmaessig unter `./agent_modules/<modulname>.sock`. Die Kommunikation laeuft ueber JSON Lines mit Requests wie `{id,type:"request",action,payload}` und Responses wie `{id,type:"response",ok,payload,error}`.
 
+Der Host-Agent bietet zusaetzlich einen eigenen lokalen Control-Socket unter `controlSocket.path`. Dort koennen externe Clients Prompts als JSON Lines einreichen und Events fuer `queued`, `started`, `stream`, `completed`, `failed` und `aborted` empfangen. Ausserdem koennen Module ueber denselben Socket eigene TUI-Fenster mit `panel_update` und `panel_close` steuern. Externe Requests laufen seriell per FIFO-Queue; TUI-Prompts haben Vorrang vor wartenden externen Requests.
+
+In der TUI oeffnet `F2` den Modulmanager. Dort lassen sich Module starten, stoppen, deaktivieren und wieder aktivieren. Deaktivierte Module bleiben sichtbar, werden aber hart blockiert und bei Bedarf sofort gestoppt.
+
+Standardaktionen fuer Host-kompatible Module:
+
+- `handshake` oder `describe` fuer Discovery und Capability-Angaben
+- `health` fuer einfache Laufzeitpruefung
+- `review_completion` fuer den host-seitigen Abschluss-Check vor finalen Antworten
+
+`review_completion` soll kompakt antworten, typischerweise mit `{hasOpenPoints,summary,openPoints}`. Vor jeder finalen Agent-Antwort prueft der Host alle laufenden Module mit dieser Aktion. Melden Module offene Punkte, wird die Finalisierung blockiert und diese Punkte gehen als Pflichtkontext zurueck in die Tool-Loop. Module ohne `review_completion` werden uebersprungen. Technische Fehler bei laufenden Modulen blockieren den Abschluss konservativ ebenfalls.
+
 Wichtige Settings:
 
 - `modules.dir` definiert das Modul-Root-Verzeichnis
+- `modules.policyPath` speichert deaktivierte Module persistent
 - `modules.socketTimeoutMs` begrenzt einzelne Socket-Requests
 - `modules.startupTimeoutMs` begrenzt den Start inkl. Handshake
 - `modules.discoveryTopK` begrenzt Discovery-Treffer
@@ -137,6 +152,9 @@ Wichtige Settings:
 - `modules.autoStartOnCall` erlaubt impliziten Modulstart vor einem Call
 - `modules.includeModuleDetailsInPrompt` steuert, ob Discovery standardmaessig Details statt Kurzfassungen liefert
 - `modules.maxResponseBytes` begrenzt die maximale Antwortgroesse pro Modulaufruf
+- `controlSocket.path` definiert den Host-Socket fuer externe Clients
+- `controlSocket.maxQueuedRequests` begrenzt wartende externe Anfragen
+- `controlSocket.requestTimeoutMs` ist die Obergrenze fuer externe Anfrage-Laufzeiten
 
 ### Agent Memory
 

@@ -4,6 +4,8 @@ import { bootstrapAgentModuleTool } from "./definitions/bootstrapAgentModule";
 import { callAgentModuleTool } from "./definitions/callAgentModule";
 import { CreateTypescriptFileTool, createTypescriptFileTool } from "./definitions/createTypescriptFile";
 import { discoverAgentModulesTool } from "./definitions/discoverAgentModules";
+import { execTypescriptInAgentModuleTool } from "./definitions/execTypescriptInAgentModule";
+import { execTypescriptInScriptPathTool } from "./definitions/execTypescriptInScriptPath";
 import { QueryScriptRegistryTool, queryScriptRegistryTool } from "./definitions/queryScriptRegistry";
 import { RunTypescriptFileTool, runTypescriptFileTool } from "./definitions/runTypescriptFile";
 import { startAgentModuleTool } from "./definitions/startAgentModule";
@@ -23,7 +25,9 @@ export class ToolRegistry {
     queryScriptRegistryTool,
     createTypescriptFileTool,
     runTypescriptFileTool,
+    execTypescriptInScriptPathTool,
     discoverAgentModulesTool,
+    execTypescriptInAgentModuleTool,
     startAgentModuleTool,
     stopAgentModuleTool,
     callAgentModuleTool,

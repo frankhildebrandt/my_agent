@@ -48,6 +48,7 @@ export interface AppSettings {
   };
   modules: {
     dir: string;
+    policyPath: string;
     socketTimeoutMs: number;
     startupTimeoutMs: number;
     discoveryTopK: number;
@@ -55,6 +56,11 @@ export interface AppSettings {
     autoStartOnCall: boolean;
     includeModuleDetailsInPrompt: boolean;
     maxResponseBytes: number;
+  };
+  controlSocket: {
+    path: string;
+    maxQueuedRequests: number;
+    requestTimeoutMs: number;
   };
   scriptRegistry: {
     path: string;
@@ -109,8 +115,7 @@ export const defaultSettings: AppSettings = {
   llm: {
     defaultModel: "openai-default",
     requestTimeoutMs: 90_000,
-    systemPrompt:
-      "Du bist ein pragmatischer, deutschsprachiger Assistent und antwortest knapp, praezise und technisch sauber. Nutze verfuegbare Tools zielgerichtet, wenn sie zur Loesung beitragen.",
+    systemPrompt: "Du bist ein pragmatischer, deutschsprachiger Assistent. Antworte knapp und technisch sauber.",
     providers: {
       openai: {
         type: "openai-compatible",
@@ -174,6 +179,7 @@ export const defaultSettings: AppSettings = {
   },
   modules: {
     dir: "./agent_modules",
+    policyPath: "./agent_modules/policy.json",
     socketTimeoutMs: 8_000,
     startupTimeoutMs: 20_000,
     discoveryTopK: 5,
@@ -181,6 +187,11 @@ export const defaultSettings: AppSettings = {
     autoStartOnCall: true,
     includeModuleDetailsInPrompt: false,
     maxResponseBytes: 131_072,
+  },
+  controlSocket: {
+    path: "./agent_socket/control.sock",
+    maxQueuedRequests: 8,
+    requestTimeoutMs: 90_000,
   },
   scriptRegistry: {
     path: "./agent_scripts/registry.json",

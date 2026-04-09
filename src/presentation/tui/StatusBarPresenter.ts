@@ -1,4 +1,5 @@
 import blessed from "blessed";
+import type { AgentExternalRequestState } from "../../domain/agentControlTypes";
 import type { StatusVariant } from "../../domain/ports";
 
 const STATUS_FRAMES = ["[   ]", "[=  ]", "[== ]", "[===]", "[ ==]", "[  =]"];
@@ -48,6 +49,7 @@ export class StatusBarPresenter {
     private readonly screen: blessed.Widgets.Screen,
     private readonly historyLengthProvider: () => number,
     private readonly scrollPercentProvider: () => number,
+    private readonly externalStateProvider?: () => AgentExternalRequestState,
   ) {}
 
   setTransientStatus(message: string, variant: StatusVariant): void {
@@ -83,18 +85,21 @@ export class StatusBarPresenter {
       this.transientStatus.message.length > 0 ? this.transientStatus.message : "Bereit fuer Eingabe";
     const historyInfo = `Verlauf ${this.historyLengthProvider()}/2000`;
     const scrollInfo = `Scroll ${Math.round(this.scrollPercentProvider())}%`;
-    const hint = "PgUp/PgDn scrollt, Ende springt nach unten, Esc bricht ab";
+    const externalState = this.externalStateProvider?.();
+    const externalInfo = externalState
+      ? `Extern aktiv ${externalState.active ? externalState.active.label : "-"} | Queue ${externalState.queued.length}`
+      : "Extern aus";
+    const hint = "PgUp/PgDn scrollt, Ende springt nach unten, Esc bricht ab, F2 Module, F4 extern abbrechen";
 
     this.status.style.border.fg = theme.border;
     this.status.setLabel(theme.label);
     this.status.setContent(
       [
         `{${theme.accent}-fg}${frame}{/${theme.accent}-fg} {bold}{${theme.glow}-fg}${escapeTags(message)}{/${theme.glow}-fg}{/bold}`,
-        `{gray-fg}${historyInfo} | ${scrollInfo} | ${hint}{/gray-fg}`,
+        `{gray-fg}${historyInfo} | ${scrollInfo} | ${externalInfo} | ${hint}{/gray-fg}`,
       ].join("\n"),
     );
 
     this.screen.render();
   }
 }
-
